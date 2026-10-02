@@ -85,9 +85,9 @@ Model invocation
 ## Upstream compatibility limitation
 
 The plugin sends Bearer authorization, `anthropic-version: 2023-06-01`, and
-`anthropic-beta: oauth-2025-04-20`. It preserves user instructions and exact tool names. It **does
-not impersonate the official Claude Code client**, inject an official-client system identity, or
-forge a Claude CLI version.
+`anthropic-beta: oauth-2025-04-20`. It preserves user instructions and exact tool names, and
+prepends `You are Claude Code, Anthropic's official CLI for Claude.` ahead of those instructions.
+Opus subscription calls are rejected without that sentence. It does not forge a Claude CLI version.
 
 A live Haiku request succeeded without these transformations on 2026-09-30. That result does not
 establish compatibility with every model or account. Anthropic may still reject third-party

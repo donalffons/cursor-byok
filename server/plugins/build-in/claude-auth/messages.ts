@@ -4,6 +4,10 @@ import type { LlmContentPart, LlmRequest, ModelUsage, ProviderOutput } from "cur
 
 const REPLAY_KIND = "claude_oauth";
 
+/** Anthropic accepts Opus subscription calls only when this identity leads the system prompt. */
+export const CLAUDE_CODE_SYSTEM_PROMPT =
+  "You are Claude Code, Anthropic's official CLI for Claude.";
+
 /** Safe classification only: upstream response bodies and error messages are never retained. */
 export class HttpError extends Error {
   readonly headers: Record<string, string>;
@@ -100,9 +104,13 @@ export function buildMessagesBody(model: ModelSnapshot, request: LlmRequest): Ob
     requested && requested > 0 ? requested : 8192,
     maximum && maximum > 0 ? maximum : Number.MAX_SAFE_INTEGER,
   );
+  const system: JsonValue[] = [{ type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT }];
+  if (request.instructions.length > 0) {
+    system.push({ type: "text", text: request.instructions });
+  }
   const body: ObjectValue = {
     model: model.id,
-    system: request.instructions,
+    system,
     messages,
     max_tokens: maxTokens,
     stream: true,

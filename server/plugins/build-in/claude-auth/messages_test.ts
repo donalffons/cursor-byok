@@ -1,7 +1,12 @@
 import type { JsonValue, NetworkEventStream, PluginContext } from "cursor-byok:plugin";
 import type { ModelSnapshot } from "cursor-byok:model";
 import type { LlmRequest, ModelEvent } from "cursor-byok:provider";
-import { buildMessagesBody, HttpError, streamMessages } from "./messages.ts";
+import {
+  buildMessagesBody,
+  CLAUDE_CODE_SYSTEM_PROMPT,
+  HttpError,
+  streamMessages,
+} from "./messages.ts";
 
 function assert(value: unknown, message = "assertion failed"): asserts value {
   if (!value) throw new Error(message);
@@ -107,7 +112,10 @@ Deno.test("messages preserve append-only prefix, system content, and exact tool 
   const after = buildMessagesBody(model, next);
   equal((after.messages as JsonValue[]).slice(0, 2), before.messages);
   equal(after.system, before.system);
-  equal(before.system, first.instructions);
+  equal(before.system, [
+    { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT },
+    { type: "text", text: first.instructions },
+  ]);
   equal(before.messages, [
     { role: "user", content: [{ type: "text", text: "context A" }] },
     { role: "user", content: [{ type: "text", text: "hello" }] },
