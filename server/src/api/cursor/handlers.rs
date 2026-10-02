@@ -409,19 +409,15 @@ fn is_agent_payload(data: &str) -> bool {
         .is_some_and(|message| message.message.is_some())
 }
 
+/// A Run is a subagent when a parent tool call spawned it. Cursor sends
+/// `x-parent-request-id` independently (and omits it when the parent resumes a
+/// Multitask side chat), so only the tool call id defines the parent.
 pub(crate) fn parent_headers(headers: &HeaderMap) -> Result<Option<TransportParent>> {
-    let request_id = header_text(headers, "x-parent-request-id")?;
-    let tool_call_id = header_text(headers, "x-parent-agent-tool-call-id")?;
-    match (request_id, tool_call_id) {
-        (None, None) => Ok(None),
-        (Some(request_id), Some(tool_call_id)) => Ok(Some(TransportParent {
-            request_id: request_id.into(),
+    Ok(
+        header_text(headers, "x-parent-agent-tool-call-id")?.map(|tool_call_id| TransportParent {
             tool_call_id: tool_call_id.into(),
-        })),
-        _ => Err(crate::Error::Protocol(
-            "Cursor subagent request must include both parent headers".into(),
-        )),
-    }
+        }),
+    )
 }
 
 pub(crate) fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>> {
@@ -450,5 +446,37 @@ mod tests {
             agent::AgentClientMessage::default().encode_to_vec()
         )));
         assert!(!is_agent_payload(&hex::encode([0x7a, 0x01, 0x00])));
+    }
+
+    #[test]
+    fn only_the_parent_tool_call_defines_a_subagent() {
+        let headers = |pairs: &[(&'static str, &'static str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, HeaderValue::from_static(value));
+            }
+            map
+        };
+        let parent = Some(TransportParent {
+            tool_call_id: "tool".into(),
+        });
+        assert_eq!(parent_headers(&headers(&[])).unwrap(), None);
+        assert_eq!(
+            parent_headers(&headers(&[("x-parent-request-id", "parent")])).unwrap(),
+            None
+        );
+        // Parent resuming a Multitask side chat sends only the tool call.
+        assert_eq!(
+            parent_headers(&headers(&[("x-parent-agent-tool-call-id", "tool")])).unwrap(),
+            parent
+        );
+        assert_eq!(
+            parent_headers(&headers(&[
+                ("x-parent-request-id", "parent"),
+                ("x-parent-agent-tool-call-id", "tool"),
+            ]))
+            .unwrap(),
+            parent
+        );
     }
 }
