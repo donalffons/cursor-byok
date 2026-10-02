@@ -232,6 +232,7 @@ Deno.test("stream preserves signed/redacted thinking interleaving, tool indices 
     type: "usage",
     usage: {
       inputTokens: 10,
+      contextInputTokens: 60,
       outputTokens: 7,
       totalTokens: 67,
       cacheReadTokens: 30,
@@ -350,6 +351,29 @@ Deno.test("HTTP and SSE errors retain safe status and Retry-After, not upstream 
   assert(!String(sse).includes("secret-token"));
 });
 
+Deno.test("an over-limit 400 keeps only the classification the host compacts on", async () => {
+  const body = JSON.stringify({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "prompt is too long: 1003117 tokens > 1000000 maximum",
+    },
+  });
+  const error = await rejects(() =>
+    streamMessages(
+      model,
+      request(),
+      { authorization: "Bearer private-token" },
+      { emit: () => {} },
+      context({ status: 400, headers: {}, lines: lines([body]) }),
+    )
+  );
+  assert(error instanceof HttpError);
+  equal(error.message, "Anthropic Messages 400: prompt is too long");
+  equal(error.errorType, undefined);
+  assert(!error.message.includes("1003117"));
+});
+
 Deno.test("cancellation interrupts pending stream read and preserves abort reason", async () => {
   const controller = new AbortController();
   const reason = new Error("test cancellation");
@@ -450,6 +474,7 @@ Deno.test("length finish wins over tool presence and absent usage fields stay un
     type: "usage",
     usage: {
       inputTokens: null,
+      contextInputTokens: null,
       outputTokens: 5,
       totalTokens: null,
       cacheReadTokens: null,

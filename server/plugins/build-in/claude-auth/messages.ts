@@ -8,6 +8,11 @@ const REPLAY_KIND = "claude_oauth";
 export const CLAUDE_CODE_SYSTEM_PROMPT =
   "You are Claude Code, Anthropic's official CLI for Claude.";
 
+/** Anthropic's refusal for a prompt over the context window; the host compacts when it sees it. */
+export const PROMPT_TOO_LONG = "prompt is too long";
+/** Error bodies are a few hundred bytes; a larger body is not an Anthropic error object. */
+const ERROR_BODY_LIMIT = 64 * 1024;
+
 /** Safe classification only: upstream response bodies and error messages are never retained. */
 export class HttpError extends Error {
   readonly headers: Record<string, string>;
@@ -15,8 +20,10 @@ export class HttpError extends Error {
     readonly status: number,
     headers: Record<string, string>,
     readonly errorType?: string,
+    readonly detail?: typeof PROMPT_TOO_LONG,
   ) {
-    super(`Anthropic Messages request failed (HTTP ${status})`);
+    // `<label> <status>: <detail>` lets the host recognize rejected requests and overflow.
+    super(`Anthropic Messages ${status}${detail ? `: ${detail}` : ""}`);
     this.name = "HttpError";
     // Retain retry timing, not arbitrary upstream headers that may contain credentials.
     this.headers = Object.fromEntries(
@@ -226,9 +233,13 @@ function mergeUsage(usage: ModelUsage, value: JsonValue | undefined): void {
       usage[local] = next;
     }
   }
-  if (usage.inputTokens !== null && usage.outputTokens !== null) {
-    usage.totalTokens = usage.inputTokens + usage.outputTokens +
-      (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  if (usage.inputTokens !== null) {
+    // Anthropic's input_tokens excludes the cache; the whole prompt drives host compaction.
+    usage.contextInputTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) +
+      (usage.cacheWriteTokens ?? 0);
+    if (usage.outputTokens !== null) {
+      usage.totalTokens = usage.contextInputTokens + usage.outputTokens;
+    }
   }
 }
 function streamError(value: ObjectValue, headers: Record<string, string>): HttpError {
@@ -247,6 +258,19 @@ function streamError(value: ObjectValue, headers: Record<string, string>): HttpE
     ? errorType
     : "api_error";
   return new HttpError(statuses[known], headers, known);
+}
+
+/** Keeps only the over-limit classification, never the upstream text itself. */
+function overflowDetail(body: string): typeof PROMPT_TOO_LONG | undefined {
+  let message: unknown;
+  try {
+    message = object(object(JSON.parse(body))?.error)?.message;
+  } catch {
+    return undefined;
+  }
+  return typeof message === "string" && message.toLowerCase().includes(PROMPT_TOO_LONG)
+    ? PROMPT_TOO_LONG
+    : undefined;
 }
 
 export async function streamMessages(
@@ -272,10 +296,15 @@ export async function streamMessages(
   );
   context.signal.throwIfAborted();
   if (response.status < 200 || response.status >= 300) {
-    // Start then close the host's lazy iterator, otherwise its stream handle stays open.
+    // Drain the host's lazy iterator, otherwise its stream handle stays open.
     const iterator = response.lines[Symbol.asyncIterator]();
+    let body = "";
     try {
-      await abortable(iterator.next(), context.signal);
+      while (body.length <= ERROR_BODY_LIMIT) {
+        const item = await abortable(iterator.next(), context.signal);
+        if (item.done) break;
+        body += item.value;
+      }
     } catch {
       context.signal.throwIfAborted();
     } finally {
@@ -283,7 +312,7 @@ export async function streamMessages(
         void iterator.return?.().catch(() => {});
       } catch { /* Preserve HTTP status. */ }
     }
-    throw new HttpError(response.status, response.headers);
+    throw new HttpError(response.status, response.headers, undefined, overflowDetail(body));
   }
   const blocks: ObjectValue[] = [];
   let active: BlockState | null = null;
@@ -295,6 +324,7 @@ export async function streamMessages(
   let hasUsage = false;
   const usage: ModelUsage = {
     inputTokens: null,
+    contextInputTokens: null,
     outputTokens: null,
     totalTokens: null,
     cacheReadTokens: null,

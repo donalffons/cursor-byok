@@ -535,6 +535,17 @@ mod tests {
             None,
         );
         assert!(!too_long.retryable);
+        // The Claude subscription plugin reports only the classification.
+        let plugin_too_long = failure(
+            RunFailure::Provider("Anthropic Messages 400: prompt is too long".into()),
+            String::new(),
+            String::new(),
+            None,
+        );
+        assert!(!plugin_too_long.retryable);
+        assert!(crate::run::compaction::is_context_overflow(
+            "Anthropic Messages 400: prompt is too long"
+        ));
         let unauthorized = failure(
             RunFailure::Provider("OpenAI Chat 401 Unauthorized: invalid api key".into()),
             String::new(),

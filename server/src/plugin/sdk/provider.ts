@@ -65,6 +65,12 @@ export type LlmRequest = {
 
 export type ModelUsage = {
   inputTokens: number | null;
+  /**
+   * Whole prompt size, which drives automatic compaction. Set it when `inputTokens` excludes
+   * cached tokens (Anthropic counts cache reads and writes separately); omitted means
+   * `inputTokens` already covers the whole prompt.
+   */
+  contextInputTokens?: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
   cacheReadTokens: number | null;

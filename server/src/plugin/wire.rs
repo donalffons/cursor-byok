@@ -150,7 +150,7 @@ pub fn model_event(value: &serde_json::Value) -> Result<ModelEvent> {
             let input_tokens = tokens("inputTokens");
             ModelEvent::Usage(Usage {
                 input_tokens,
-                context_input_tokens: input_tokens,
+                context_input_tokens: tokens("contextInputTokens").or(input_tokens),
                 output_tokens: tokens("outputTokens"),
                 total_tokens: tokens("totalTokens"),
                 cache_read_tokens: tokens("cacheReadTokens"),
@@ -295,6 +295,16 @@ mod tests {
                 reasoning_tokens: None,
             })
         );
+        let anthropic = model_event(&serde_json::json!({
+            "type":"usage",
+            "usage":{"inputTokens":2,"contextInputTokens":986_935,"cacheReadTokens":986_933}
+        }))
+        .unwrap();
+        let ModelEvent::Usage(anthropic) = anthropic else {
+            panic!("expected usage")
+        };
+        assert_eq!(anthropic.input_tokens, Some(2));
+        assert_eq!(anthropic.context_input_tokens, Some(986_935));
         assert!(model_event(&serde_json::json!({"type":"mystery"})).is_err());
     }
 }
