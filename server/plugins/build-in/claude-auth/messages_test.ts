@@ -451,6 +451,29 @@ Deno.test("length finish wins over tool presence and absent usage fields stay un
   });
 });
 
+Deno.test("tool ids from other models are rewritten to the characters Anthropic accepts", () => {
+  const req = request();
+  const callId = "call-4a0b-104\nfc_ecf1.e9a6";
+  req.messages = [{
+    role: "assistant",
+    text: "",
+    thinking: "",
+    toolCalls: [{ index: 0, callId, name: "Shell", arguments: {} }],
+    replayState: { providerKind: "cursor_opaque", value: "opaque" },
+  }, {
+    role: "tool",
+    callId,
+    name: "Shell",
+    content: "done",
+    isError: false,
+    parts: [],
+  }];
+  type Block = Record<string, JsonValue>;
+  const [assistant, tool] = buildMessagesBody(model, req).messages as Block[];
+  equal((assistant.content as Block[])[0].id, "call-4a0b-104_fc_ecf1_e9a6");
+  equal((tool.content as Block[])[0].tool_use_id, "call-4a0b-104_fc_ecf1_e9a6");
+});
+
 Deno.test("foreign replay is ignored and canonical tool calls remain exact", () => {
   const req = request();
   req.messages = [{

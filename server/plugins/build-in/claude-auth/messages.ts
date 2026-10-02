@@ -51,6 +51,10 @@ function signedThinking(value: JsonValue): boolean {
     typeof block.signature === "string" && block.signature.length > 0) ||
     (block.type === "redacted_thinking" && typeof block.data === "string"));
 }
+/** Anthropic accepts only `[a-zA-Z0-9_-]+` ids; calls made by other models may contain more. */
+function toolUseId(callId: string): string {
+  return callId.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
 
 export function buildMessagesBody(model: ModelSnapshot, request: LlmRequest): ObjectValue {
   const messages: JsonValue[] = request.messages.map((message): JsonValue => {
@@ -69,7 +73,7 @@ export function buildMessagesBody(model: ModelSnapshot, request: LlmRequest): Ob
         if (message.text) content.push({ type: "text", text: message.text });
         content.push(...message.toolCalls.map((tool): JsonValue => ({
           type: "tool_use",
-          id: tool.callId,
+          id: toolUseId(tool.callId),
           name: tool.name,
           input: tool.arguments,
         })));
@@ -81,7 +85,7 @@ export function buildMessagesBody(model: ModelSnapshot, request: LlmRequest): Ob
         role: "user",
         content: [{
           type: "tool_result",
-          tool_use_id: message.callId,
+          tool_use_id: toolUseId(message.callId),
           is_error: message.isError,
           content: message.parts.length ? message.parts.map(part) : message.content,
         }],

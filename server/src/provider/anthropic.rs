@@ -360,7 +360,7 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                     "user",
                     vec![json!({
                         "type": "tool_result",
-                        "tool_use_id": result.call_id,
+                        "tool_use_id": tool_use_id(&result.call_id),
                         "content": content,
                     })],
                 );
@@ -386,7 +386,7 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                 content.extend(calls.iter().map(|call| {
                     json!({
                         "type": "tool_use",
-                        "id": call.call_id,
+                        "id": tool_use_id(&call.call_id),
                         "name": call.name,
                         "input": call.arguments,
                     })
@@ -398,6 +398,20 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
         }
     }
     Ok(output)
+}
+
+/// Anthropic accepts only `[a-zA-Z0-9_-]+` ids; calls made by other models may contain more.
+fn tool_use_id(call_id: &str) -> String {
+    call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn mark_cache_breakpoint(messages: &mut [Value]) {
@@ -543,5 +557,48 @@ mod tests {
         assert_eq!(usage.context_input_tokens, Some(100_766));
         assert_eq!(usage.output_tokens, Some(191));
         assert_eq!(usage.total_tokens, Some(100_957));
+    }
+
+    #[test]
+    fn tool_ids_from_other_models_are_rewritten_to_anthropic_characters() {
+        use crate::model::{ToolCallContent, ToolResultContent};
+        let call_id = "call-4a0b-104\nfc_ecf1.e9a6";
+        let messages = [
+            ProjectedMessage {
+                message_id: "assistant".into(),
+                role: Role::Assistant,
+                content: ProjectedContent::Assistant {
+                    text: String::new(),
+                    thinking: String::new(),
+                    replay_state: None,
+                    calls: vec![ToolCallContent {
+                        index: 0,
+                        call_id: call_id.into(),
+                        name: "Shell".into(),
+                        arguments: json!({}),
+                    }],
+                },
+            },
+            ProjectedMessage {
+                message_id: "result".into(),
+                role: Role::Tool,
+                content: ProjectedContent::ToolResult(ToolResultContent {
+                    call_id: call_id.into(),
+                    name: "Shell".into(),
+                    content: "done".into(),
+                    is_error: false,
+                    image: None,
+                    provider_parts: Vec::new(),
+                }),
+            },
+        ];
+
+        let output = anthropic_messages(&messages).unwrap();
+
+        assert_eq!(output[0]["content"][0]["id"], "call-4a0b-104_fc_ecf1_e9a6");
+        assert_eq!(
+            output[1]["content"][0]["tool_use_id"],
+            "call-4a0b-104_fc_ecf1_e9a6"
+        );
     }
 }
