@@ -269,3 +269,41 @@ fn opaque_cursor_reasoning_signature_round_trips_without_decoding() {
     let encoded = wire_message(&projected[0], "model", None).unwrap();
     assert_eq!(encoded["content"][0]["signature"], signature);
 }
+
+#[test]
+fn several_opaque_cursor_reasoning_parts_round_trip_verbatim() {
+    // Cursor-hosted models sign each reasoning segment of one assistant turn.
+    let reasoning = [
+        json!({"type":"reasoning", "text":"first", "signature":"sig-a",
+               "providerOptions":{"cursor":{"modelName":"cursor-model"}}}),
+        json!({"type":"reasoning", "text":"second", "signature":"sig-b"}),
+    ];
+    let wire = json!({
+        "role": "assistant",
+        "id": "1",
+        "content": [reasoning[0], {"type":"text", "text":"done"}, reasoning[1]],
+    });
+    let message = decode(
+        serde_json::to_vec(&wire).unwrap().as_slice(),
+        "cursor-root:opaque-many".into(),
+    )
+    .unwrap();
+    let MessageContent::Assistant {
+        thinking,
+        replay_state,
+        ..
+    } = &message.content
+    else {
+        panic!("expected assistant");
+    };
+    assert_eq!(thinking, "firstsecond");
+    assert_eq!(
+        replay_state.as_ref().unwrap().provider_kind,
+        "cursor_opaque"
+    );
+    let projected = project_messages(&[message]).unwrap();
+    let encoded = wire_message(&projected[0], "model", None).unwrap();
+    assert_eq!(encoded["content"][0], reasoning[0]);
+    assert_eq!(encoded["content"][1], reasoning[1]);
+    assert_eq!(encoded["content"][2], json!({"type":"text", "text":"done"}));
+}

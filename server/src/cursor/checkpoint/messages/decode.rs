@@ -171,7 +171,8 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
     let mut text = String::new();
     let mut thinking = String::new();
     let mut calls = Vec::new();
-    let mut replay_state = None;
+    let mut reasoning = Vec::new();
+    let mut signatures = Vec::new();
     for part in value
         .get("content")
         .and_then(Value::as_array)
@@ -185,13 +186,9 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
             Some("reasoning") => {
                 thinking.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default());
                 if let Some(signature) = part.get("signature").and_then(Value::as_str) {
-                    if replay_state.is_some() {
-                        return Err(Error::Protocol(
-                            "Cursor assistant has multiple reasoning signatures".into(),
-                        ));
-                    }
-                    replay_state = Some(decode_replay_state(signature)?);
+                    signatures.push(signature);
                 }
+                reasoning.push(part.clone());
             }
             Some("tool-call") => calls.push(ToolCallContent {
                 index: calls.len(),
@@ -202,6 +199,25 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
             _ => {}
         }
     }
+    let replay_state = match signatures.as_slice() {
+        [] => None,
+        [signature] => Some(decode_replay_state(signature)?),
+        // Cursor-hosted models sign every reasoning segment of a turn. Only
+        // Cursor can read them, so keep the segments verbatim for the round trip.
+        many if many
+            .iter()
+            .any(|signature| signature.starts_with(REPLAY_ENVELOPE_PREFIX)) =>
+        {
+            return Err(Error::Protocol(
+                "Cursor assistant mixes a BYOK replay envelope with other reasoning signatures"
+                    .into(),
+            ))
+        }
+        _ => Some(crate::model::ProviderReplayState {
+            provider_kind: "cursor_opaque".into(),
+            value: Value::Array(reasoning),
+        }),
+    };
     Ok(MessageContent::Assistant {
         text,
         thinking,

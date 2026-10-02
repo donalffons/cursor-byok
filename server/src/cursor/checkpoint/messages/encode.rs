@@ -215,7 +215,14 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
             calls,
         } => {
             let mut parts = Vec::new();
-            if !thinking.is_empty() || replay_state.is_some() {
+            if let Some(segments) = replay_state
+                .as_ref()
+                .filter(|state| state.provider_kind == "cursor_opaque")
+                .and_then(|state| state.value.as_array())
+            {
+                // Several signed segments from a Cursor-hosted model go back exactly as received.
+                parts.extend(segments.iter().cloned());
+            } else if !thinking.is_empty() || replay_state.is_some() {
                 let mut reasoning = json!({
                     "type": "reasoning",
                     "text": thinking,
