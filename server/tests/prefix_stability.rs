@@ -633,3 +633,42 @@ fn assistant_tool_pair(
         runtime_event_id: None,
     }
 }
+
+#[test]
+fn interrupted_tool_call_gets_a_stable_error_result_once_the_round_is_closed() {
+    let mut first = vec![
+        assistant_tool_pair("assistant-a", "round", 0, "call-a", "", ""),
+        assistant_tool_pair("assistant-b", "round", 1, "call-b", "", ""),
+        tool_result_with_call("result-a", "call-a", "done"),
+        fixtures::user("u1", "new question"),
+    ];
+
+    let projected_first = project_messages(&first).unwrap();
+
+    assert_eq!(projected_first.len(), 4);
+    let ProjectedContent::ToolResult(placeholder) = &projected_first[2].content else {
+        panic!("expected placeholder tool result")
+    };
+    assert_eq!(placeholder.call_id, "call-b");
+    assert!(placeholder.is_error);
+    assert_eq!(projected_first[2].role, Role::Tool);
+    assert_eq!(projected_first[3].message_id, "u1");
+
+    first.push(fixtures::user("u2", "next turn"));
+    let projected_second = project_messages(&first).unwrap();
+    assert_eq!(projected_first, projected_second[..projected_first.len()]);
+}
+
+#[test]
+fn tool_round_still_waiting_for_results_is_rejected() {
+    let messages = vec![
+        assistant_tool_pair("assistant-a", "round", 0, "call-a", "", ""),
+        assistant_tool_pair("assistant-b", "round", 1, "call-b", "", ""),
+        tool_result_with_call("result-a", "call-a", "done"),
+    ];
+
+    let error = project_messages(&messages).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("assistant tool call has no result call_id: call-b"));
+}

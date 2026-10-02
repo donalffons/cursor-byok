@@ -10,6 +10,8 @@ use super::{
     ToolCallContent, ToolResultContent,
 };
 
+const INTERRUPTED_TOOL_RESULT: &str = "Tool call was interrupted before it returned a result.";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ProjectedContent {
     Parts(Vec<ContentPart>),
@@ -113,13 +115,33 @@ fn project_tool_round(
     }
 
     calls.sort_by_key(|call| call.index);
+    // A later message closes the round: a call without a result was interrupted
+    // (for example by a new user message) and will never receive one.
+    let closed = cursor < messages.len();
     for call in &calls {
-        if !result_ids.contains(&call.call_id) {
+        if result_ids.contains(&call.call_id) {
+            continue;
+        }
+        if !closed {
             return Err(Error::Protocol(format!(
                 "assistant tool call has no result call_id: {}",
                 call.call_id
             )));
         }
+        results.push((
+            format!(
+                "{}:interrupted-result:{}",
+                messages[start].message_id, call.call_id
+            ),
+            ToolResultContent {
+                call_id: call.call_id.clone(),
+                name: call.name.clone(),
+                content: INTERRUPTED_TOOL_RESULT.into(),
+                is_error: true,
+                image: None,
+                provider_parts: Vec::new(),
+            },
+        ));
     }
 
     let mut output = Vec::with_capacity(results.len() + 1);
