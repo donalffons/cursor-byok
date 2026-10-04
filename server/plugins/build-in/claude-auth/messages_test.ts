@@ -374,6 +374,37 @@ Deno.test("an over-limit 400 keeps only the classification the host compacts on"
   assert(!error.message.includes("1003117"));
 });
 
+Deno.test("a rejected 400 keeps Anthropic's request-validation message", async () => {
+  const failure = async (message: string) =>
+    await rejects(() =>
+      streamMessages(
+        model,
+        request(),
+        { authorization: "Bearer private-token" },
+        { emit: () => {} },
+        context({
+          status: 400,
+          headers: {},
+          lines: lines([JSON.stringify({
+            type: "error",
+            error: { type: "invalid_request_error", message },
+          })]),
+        }),
+      )
+    );
+  const invalid = await failure(
+    "tools.35.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level",
+  );
+  assert(invalid instanceof HttpError);
+  equal(
+    invalid.message,
+    "Anthropic Messages 400: tools.35.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level",
+  );
+  const other = await failure("secret-token rejected");
+  assert(other instanceof HttpError);
+  equal(other.message, "Anthropic Messages 400");
+});
+
 Deno.test("cancellation interrupts pending stream read and preserves abort reason", async () => {
   const controller = new AbortController();
   const reason = new Error("test cancellation");

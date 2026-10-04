@@ -13,14 +13,14 @@ export const PROMPT_TOO_LONG = "prompt is too long";
 /** Error bodies are a few hundred bytes; a larger body is not an Anthropic error object. */
 const ERROR_BODY_LIMIT = 64 * 1024;
 
-/** Safe classification only: upstream response bodies and error messages are never retained. */
+/** Safe classification only: upstream bodies are never retained, error text only when classified. */
 export class HttpError extends Error {
   readonly headers: Record<string, string>;
   constructor(
     readonly status: number,
     headers: Record<string, string>,
     readonly errorType?: string,
-    readonly detail?: typeof PROMPT_TOO_LONG,
+    readonly detail?: string,
   ) {
     // `<label> <status>: <detail>` lets the host recognize rejected requests and overflow.
     super(`Anthropic Messages ${status}${detail ? `: ${detail}` : ""}`);
@@ -260,17 +260,20 @@ function streamError(value: ObjectValue, headers: Record<string, string>): HttpE
   return new HttpError(statuses[known], headers, known);
 }
 
-/** Keeps only the over-limit classification, never the upstream text itself. */
-function overflowDetail(body: string): typeof PROMPT_TOO_LONG | undefined {
+/**
+ * Keeps the over-limit classification, or a request-validation message that names the rejected
+ * request field (`tools.35.custom.input_schema: ...`). Any other upstream text is dropped.
+ */
+function rejectionDetail(body: string): string | undefined {
   let message: unknown;
   try {
     message = object(object(JSON.parse(body))?.error)?.message;
   } catch {
     return undefined;
   }
-  return typeof message === "string" && message.toLowerCase().includes(PROMPT_TOO_LONG)
-    ? PROMPT_TOO_LONG
-    : undefined;
+  if (typeof message !== "string") return undefined;
+  if (message.toLowerCase().includes(PROMPT_TOO_LONG)) return PROMPT_TOO_LONG;
+  return /^[a-z_]+(\.[A-Za-z0-9_-]+)*: [^\n]{1,300}$/.test(message) ? message : undefined;
 }
 
 export async function streamMessages(
@@ -312,7 +315,7 @@ export async function streamMessages(
         void iterator.return?.().catch(() => {});
       } catch { /* Preserve HTTP status. */ }
     }
-    throw new HttpError(response.status, response.headers, undefined, overflowDetail(body));
+    throw new HttpError(response.status, response.headers, undefined, rejectionDetail(body));
   }
   const blocks: ObjectValue[] = [];
   let active: BlockState | null = null;

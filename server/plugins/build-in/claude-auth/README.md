@@ -77,9 +77,12 @@ Model invocation
 - HTTP 401 receives one refresh/retry before output starts. Stream-level errors and partially
   emitted responses are never retried by this plugin. HTTP 429 uses `Retry-After` for account
   cooling.
-- Upstream error text is never retained. The one exception is a classification: a 400 whose
-  message says the prompt is too long fails as `Anthropic Messages 400: prompt is too long`, which
-  the host recognizes and answers by compacting the conversation once.
+- Upstream error text is not retained, with two classified exceptions for HTTP 400. A message saying
+  the prompt is too long fails as `Anthropic Messages 400: prompt is too long`, which the host
+  recognizes and answers by compacting the conversation once. A request-validation message that
+  names the rejected request field (for example
+  `tools.35.custom.input_schema: input_schema does not support ...`) is kept verbatim so the failure
+  explains itself.
 - Usage reports `contextInputTokens` (uncached + cache read + cache write) because Anthropic's
   `input_tokens` excludes the cache; the host's automatic compaction is driven by that total.
 - No static model fallback, credential-file import, API-key fallback, or usage-quota estimation is
