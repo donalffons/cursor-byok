@@ -48,15 +48,10 @@ pub struct ExecContext {
     pub subagents_disabled: bool,
     pub terminals_folder: String,
     pub admin_command_denylist: Vec<String>,
-    pub mcp_routes: HashMap<(String, String), McpRoute>,
-}
-
-#[derive(Clone, Debug)]
-pub struct McpRoute {
-    pub name: String,
-    pub provider_identifier: String,
-    pub tool_name: String,
-    pub description: String,
+    /// Display names of the MCP servers listed in the run's request context,
+    /// keyed by server identifier. Only labels calls; Cursor resolves each call
+    /// against its live MCP state, so servers missing here are still callable.
+    pub mcp_server_names: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug)]

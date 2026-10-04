@@ -7,7 +7,6 @@ use super::{normalized, ToolStart};
 use crate::cursor::tools::{
     codec,
     runtime::{CursorToolRuntime, ExecContext},
-    tool_call_result as result,
 };
 
 pub(super) async fn start(
@@ -23,20 +22,12 @@ pub(super) async fn start(
         "callmcptool" => {
             let server = required(call, "server")?;
             let tool = required(call, "toolName")?;
-            let Some(route) = context
-                .mcp_routes
-                .get(&(server.to_string(), tool.to_string()))
-            else {
-                return Ok(ToolStart {
-                    messages: Vec::new(),
-                    completion: Some(result::mcp_failure(
-                        call,
-                        format!("MCP descriptor not found for {server}/{tool}"),
-                    )?),
-                });
-            };
+            let provider = context
+                .mcp_server_names
+                .get(server)
+                .map_or(server, String::as_str);
             let id = runtime.reserve_exec(call, context).await?;
-            codec::mcp_meta_request(id, call, server, route)?
+            codec::mcp_meta_request(id, call, server, tool, provider)?
         }
         _ => {
             let id = runtime.reserve_exec(call, context).await?;

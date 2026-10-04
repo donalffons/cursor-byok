@@ -10,7 +10,6 @@ use serde_json::Value;
 use crate::{
     cursor::{
         protocol::proto::agent::v1 as pb, services::context_sync::RequestContextSynchronizer,
-        tools::runtime::McpRoute,
     },
     model::{normalize_tool_name, ToolDefinition},
     store::BlobId,
@@ -369,34 +368,16 @@ fn mcp_input_schema(tool: &pb::McpToolDescriptor) -> Option<String> {
         })
 }
 
-pub fn meta_mcp_routes(context: &pb::RequestContext) -> HashMap<(String, String), McpRoute> {
+pub fn meta_mcp_server_names(context: &pb::RequestContext) -> HashMap<String, String> {
     context
         .mcp_meta_tool_options
         .as_ref()
         .into_iter()
         .flat_map(|options| &options.mcp_descriptors)
-        .filter(|server| !server.server_identifier.trim().is_empty())
-        .flat_map(|server| {
-            server.tools.iter().filter_map(move |tool| {
-                if tool.tool_name.trim().is_empty() {
-                    return None;
-                }
-                let provider_identifier = if server.server_name.trim().is_empty() {
-                    server.server_identifier.clone()
-                } else {
-                    server.server_name.clone()
-                };
-                Some((
-                    (server.server_identifier.clone(), tool.tool_name.clone()),
-                    McpRoute {
-                        name: format!("{}-{}", server.server_identifier, tool.tool_name),
-                        provider_identifier,
-                        tool_name: tool.tool_name.clone(),
-                        description: tool.description.clone().unwrap_or_default(),
-                    },
-                ))
-            })
+        .filter(|server| {
+            !server.server_identifier.trim().is_empty() && !server.server_name.trim().is_empty()
         })
+        .map(|server| (server.server_identifier.clone(), server.server_name.clone()))
         .collect()
 }
 
@@ -627,6 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn merge_local_rules_appends_and_dedupes_by_content() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("a.md"), "shared rule").unwrap();
+        std::fs::write(directory.path().join("b.md"), "local only rule").unwrap();
+        std::fs::write(directory.path().join("c.md"), "   \n").unwrap();
+
+        let mut context = pb::RequestContext {
+            non_file_rules: vec![rule("  shared rule  ")],
+            ..Default::default()
+        };
+        merge_local_rules(&mut context, directory.path());
+
+        let contents = context
+            .non_file_rules
+            .iter()
+            .map(|rule| rule.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            ["  shared rule  ", "local only rule"],
+            "IDE-sent duplicate is kept once and blank local rules are skipped"
+        );
+    }
+
+    #[test]
     fn object_only_union_becomes_one_object_without_root_combinators() {
         let schema = serde_json::json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -700,31 +706,6 @@ mod tests {
             "anyOf": [{ "type": "object" }, { "type": "string" }]
         });
         assert!(normalize_mcp_parameters("mixed", schema).is_err());
-    }
-
-    #[test]
-    fn merge_local_rules_appends_and_dedupes_by_content() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("a.md"), "shared rule").unwrap();
-        std::fs::write(directory.path().join("b.md"), "local only rule").unwrap();
-        std::fs::write(directory.path().join("c.md"), "   \n").unwrap();
-
-        let mut context = pb::RequestContext {
-            non_file_rules: vec![rule("  shared rule  ")],
-            ..Default::default()
-        };
-        merge_local_rules(&mut context, directory.path());
-
-        let contents = context
-            .non_file_rules
-            .iter()
-            .map(|rule| rule.content.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            contents,
-            ["  shared rule  ", "local only rule"],
-            "IDE-sent duplicate is kept once and blank local rules are skipped"
-        );
     }
 
     #[test]

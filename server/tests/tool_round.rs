@@ -53,21 +53,15 @@ fn exec_context() -> ExecContext {
         admin_command_denylist: Vec::new(),
         allow_subagents: true,
         subagents_disabled: false,
-        mcp_routes: std::collections::HashMap::new(),
+        mcp_server_names: std::collections::HashMap::new(),
     }
 }
 
-fn mcp_context(server: &str, provider: &str, tool: &str) -> ExecContext {
+fn mcp_context(server: &str, provider: &str) -> ExecContext {
     let mut context = exec_context();
-    context.mcp_routes.insert(
-        (server.into(), tool.into()),
-        cursor_server::cursor::tools::runtime::McpRoute {
-            name: format!("{server}-{tool}"),
-            provider_identifier: provider.into(),
-            tool_name: tool.into(),
-            description: "fixture MCP tool".into(),
-        },
-    );
+    context
+        .mcp_server_names
+        .insert(server.into(), provider.into());
     context
 }
 
@@ -261,11 +255,7 @@ async fn call_mcp_tool_uses_the_request_descriptor_and_returns_client_errors_to_
             },
             &[],
             &BTreeMap::new(),
-            &mcp_context(
-                "plugin-browser-use-browser-use",
-                "browser-use",
-                "browser_exec",
-            ),
+            &mcp_context("plugin-browser-use-browser-use", "browser-use"),
         )
         .await
         .unwrap();
@@ -372,16 +362,19 @@ async fn mcp_auth_uses_the_cursor_auth_interaction_without_a_tool_definition() {
     ));
 }
 
+/// A server can be missing from the run's request context while Cursor already
+/// serves it again (e.g. cursor-app-control re-registering seconds after the
+/// run started). Cursor resolves the call against its live MCP state.
 #[tokio::test]
-async fn unknown_mcp_descriptor_returns_a_tool_error_without_client_discovery() {
+async fn mcp_server_missing_from_request_context_is_forwarded_to_cursor() {
     let dispatcher = ToolDispatcher::new(CursorToolRuntime::default());
     let completed = HashSet::new();
     let started = HashSet::new();
-    let mut invocation = call("call-fast-context", "CallMcpTool");
+    let mut invocation = call("call-move", "CallMcpTool");
     invocation.arguments = json!({
-        "server": "fast-context",
-        "toolName": "fast_context_search",
-        "arguments": {"query": "MCP dispatch"}
+        "server": "cursor-app-control",
+        "toolName": "move_agent_to_root",
+        "arguments": {"rootPath": "/tmp/project"}
     });
     let dispatched = dispatcher
         .start_batch(
@@ -398,13 +391,19 @@ async fn unknown_mcp_descriptor_returns_a_tool_error_without_client_discovery() 
         )
         .await
         .unwrap();
-    assert_eq!(dispatched[0].messages.len(), 1);
-    let completion = dispatched[0]
-        .completion
-        .as_ref()
-        .expect("missing descriptor should complete as a tool error");
-    assert!(completion.result().is_error);
-    assert!(completion.result().content.contains("descriptor not found"));
+    assert!(dispatched[0].completion.is_none());
+    let Some(pb::agent_server_message::Message::ExecServerMessage(exec)) =
+        dispatched[0].messages[1].message.as_ref()
+    else {
+        panic!("expected MCP Exec")
+    };
+    let Some(pb::exec_server_message::Message::McpArgs(args)) = exec.message.as_ref() else {
+        panic!("expected McpArgs")
+    };
+    assert_eq!(args.name, "cursor-app-control-move_agent_to_root");
+    assert_eq!(args.server_identifier, "cursor-app-control");
+    assert_eq!(args.provider_identifier, "cursor-app-control");
+    assert_eq!(args.tool_name, "move_agent_to_root");
 }
 
 #[tokio::test]

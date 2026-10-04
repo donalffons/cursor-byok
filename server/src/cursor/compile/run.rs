@@ -609,6 +609,6 @@ fn exec_context(
             .map(|env| env.terminals_folder.clone())
             .unwrap_or_default(),
         admin_command_denylist: request_context.admin_command_denylist.clone(),
-        mcp_routes: context::meta_mcp_routes(request_context),
+        mcp_server_names: context::meta_mcp_server_names(request_context),
     }
 }

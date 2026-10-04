@@ -6,7 +6,7 @@ use crate::{
         protocol::proto::agent::v1 as pb,
         tools::{
             edit::{self, EditWrite},
-            runtime::{ExecContext, McpRoute},
+            runtime::ExecContext,
         },
     },
     model::ToolCall,
@@ -278,28 +278,15 @@ pub fn mcp_request(
     })
 }
 
+/// Forwards CallMcpTool to Cursor, which resolves `server_identifier` and the
+/// tool against its live MCP state and reports unknown servers or tools itself.
 pub(crate) fn mcp_meta_request(
     id: u32,
     call: &ToolCall,
     server_identifier: &str,
-    route: &McpRoute,
+    tool_name: &str,
+    provider_identifier: &str,
 ) -> Result<pb::AgentServerMessage> {
-    if route.name.is_empty() || route.provider_identifier.is_empty() || route.tool_name.is_empty() {
-        return Err(Error::Protocol(format!(
-            "MCP definition for {server_identifier} is incomplete"
-        )));
-    }
-    let requested_tool = call
-        .arguments
-        .get("toolName")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Protocol("CallMcpTool is missing toolName".into()))?;
-    if requested_tool != route.tool_name {
-        return Err(Error::Protocol(format!(
-            "MCP definition mismatch: requested {requested_tool}, resolved {}",
-            route.tool_name
-        )));
-    }
     let args = call
         .arguments
         .get("arguments")
@@ -310,11 +297,11 @@ pub(crate) fn mcp_meta_request(
         id,
         call,
         pb::exec_server_message::Message::McpArgs(pb::McpArgs {
-            name: route.name.clone(),
+            name: format!("{server_identifier}-{tool_name}"),
             args,
             tool_call_id: call.call_id.clone(),
-            provider_identifier: route.provider_identifier.clone(),
-            tool_name: route.tool_name.clone(),
+            provider_identifier: provider_identifier.into(),
+            tool_name: tool_name.into(),
             smart_mode_approval: smart_mode_approval(
                 call,
                 "requestSmartModeApproval",
