@@ -511,40 +511,72 @@ pub fn dynamic_mcp(
     Ok(output)
 }
 
-fn normalize_mcp_parameters(tool_name: &str, mut parameters: Value) -> Result<Value> {
-    let schema = parameters
-        .as_object_mut()
-        .ok_or_else(|| invalid_mcp_parameters(tool_name))?;
+/// Providers need one object schema at the root; Anthropic additionally rejects
+/// `anyOf`/`oneOf`/`allOf` there. Cursor's app-control MCP sends object-only
+/// unions, so they are merged into one object: every branch's properties, the
+/// fields all branches require, and closed only if every branch is closed.
+/// Which branch applies is left to the MCP server's own argument validation.
+fn normalize_mcp_parameters(tool_name: &str, parameters: Value) -> Result<Value> {
+    let Value::Object(mut schema) = parameters else {
+        return Err(invalid_mcp_parameters(tool_name));
+    };
     match schema.get("type") {
-        Some(Value::String(schema_type)) if schema_type == "object" => return Ok(parameters),
+        Some(Value::String(schema_type)) if schema_type == "object" => {
+            return Ok(Value::Object(schema))
+        }
         Some(_) => return Err(invalid_mcp_parameters(tool_name)),
         None => {}
     }
-    let object_only_union = ["anyOf", "oneOf"].into_iter().any(|keyword| {
-        schema
-            .get(keyword)
-            .and_then(Value::as_array)
-            .is_some_and(|branches| {
-                !branches.is_empty()
-                    && branches.iter().all(|branch| {
-                        branch
-                            .as_object()
-                            .and_then(|branch| branch.get("type"))
-                            .and_then(Value::as_str)
-                            == Some("object")
-                    })
-            })
-    });
-    if !object_only_union {
+    let unions = ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|keyword| schema.remove(keyword))
+        .collect::<Vec<_>>();
+    let ([Value::Array(branches)], None) = (unions.as_slice(), schema.get("allOf")) else {
         return Err(invalid_mcp_parameters(tool_name));
+    };
+    let mut properties = serde_json::Map::new();
+    let mut required: Option<Vec<Value>> = None;
+    let mut closed = true;
+    for branch in branches {
+        let Some(branch) = branch
+            .as_object()
+            .filter(|branch| branch.get("type").and_then(Value::as_str) == Some("object"))
+        else {
+            return Err(invalid_mcp_parameters(tool_name));
+        };
+        if let Some(Value::Object(branch_properties)) = branch.get("properties") {
+            for (name, property) in branch_properties {
+                properties
+                    .entry(name.clone())
+                    .or_insert_with(|| property.clone());
+            }
+        }
+        let branch_required = branch
+            .get("required")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        required = Some(match required {
+            None => branch_required,
+            Some(names) => names
+                .into_iter()
+                .filter(|name| branch_required.contains(name))
+                .collect(),
+        });
+        closed &= branch.get("additionalProperties") == Some(&Value::Bool(false));
     }
-    // OpenAI-compatible function schemas (and the corresponding schema
-    // validators used by other providers) require the root schema to declare
-    // an object type. Cursor's app-control MCP sometimes sends an object-only
-    // `anyOf`/`oneOf` schema without that root annotation. Preserve the union
-    // while adding the annotation to the model-facing copy.
-    schema.insert("type".into(), Value::String("object".into()));
-    Ok(parameters)
+    let Some(required) = required else {
+        return Err(invalid_mcp_parameters(tool_name));
+    };
+    schema.insert("type".into(), "object".into());
+    schema.insert("properties".into(), Value::Object(properties));
+    if !required.is_empty() {
+        schema.insert("required".into(), Value::Array(required));
+    }
+    if closed {
+        schema.insert("additionalProperties".into(), false.into());
+    }
+    Ok(Value::Object(schema))
 }
 
 fn invalid_mcp_parameters(tool_name: &str) -> Error {
@@ -592,6 +624,82 @@ mod tests {
             content: content.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn object_only_union_becomes_one_object_without_root_combinators() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "rootPath": { "type": "string" },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["rootPath", "reason"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "rootPaths": { "type": "array", "items": { "type": "string" } },
+                        "reason": { "type": "string" }
+                    },
+                    "required": ["rootPaths", "reason"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+
+        let normalized = normalize_mcp_parameters("move_agent_to_root", schema).unwrap();
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "rootPath": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "rootPaths": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["reason"],
+                "additionalProperties": false
+            }),
+            "Anthropic rejects anyOf/oneOf/allOf at the schema root"
+        );
+    }
+
+    #[test]
+    fn union_with_open_branch_stays_open_and_object_schema_is_untouched() {
+        let one_of = serde_json::json!({
+            "oneOf": [
+                { "type": "object", "properties": { "a": { "type": "string" } }, "additionalProperties": false },
+                { "type": "object", "properties": { "b": { "type": "string" } } }
+            ]
+        });
+        assert_eq!(
+            normalize_mcp_parameters("dialog", one_of).unwrap(),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "a": { "type": "string" }, "b": { "type": "string" } }
+            })
+        );
+
+        let object = serde_json::json!({ "type": "object", "properties": {} });
+        assert_eq!(
+            normalize_mcp_parameters("plain", object.clone()).unwrap(),
+            object
+        );
+    }
+
+    #[test]
+    fn union_with_a_non_object_branch_is_rejected() {
+        let schema = serde_json::json!({
+            "anyOf": [{ "type": "object" }, { "type": "string" }]
+        });
+        assert!(normalize_mcp_parameters("mixed", schema).is_err());
     }
 
     #[test]
