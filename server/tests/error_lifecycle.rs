@@ -604,6 +604,7 @@ async fn parent_request_does_not_need_to_resolve_to_an_active_run() {
             tool_call_id: "original-tool-call".into(),
         }),
         None,
+        "independent-user",
     )
     .await;
 }
@@ -614,16 +615,38 @@ async fn subagent_type_does_not_require_parent_metadata() {
         "parentless-subagent-request",
         None,
         Some("generalPurpose"),
+        "independent-user",
     )
     .await;
+}
+
+#[tokio::test]
+async fn task_prompt_without_message_id_is_identified_by_its_tool_call() {
+    // Cursor's durable Task runner (subagents started from a side chat) omits message_id.
+    let (_directory, store) = assert_run_starts_without_parent_dependency(
+        "side-chat-subagent-request",
+        Some(TransportParent {
+            tool_call_id: "side-chat-task-call".into(),
+        }),
+        Some("generalPurpose"),
+        "",
+    )
+    .await;
+
+    let input_ids: Vec<String> = sqlx::query_scalar("SELECT input_id FROM input_anchors")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(input_ids, ["cursor:task:side-chat-task-call"]);
 }
 
 async fn assert_run_starts_without_parent_dependency(
     request_id: &str,
     parent: Option<TransportParent>,
     subagent_type_name: Option<&str>,
-) {
-    let (_directory, store) = fixtures::temp_store().await;
+    message_id: &str,
+) -> (tempfile::TempDir, cursor_server::store::Store) {
+    let (directory, store) = fixtures::temp_store().await;
     let provider = fake_provider::FakeProvider::default();
     provider.push(vec![
         ModelEvent::Start {
@@ -650,7 +673,7 @@ async fn assert_run_starts_without_parent_dependency(
         handle.set_parent(parent).unwrap();
     }
     let mut output = handle.subscribe();
-    let mut message = protocol_client_run("continue", "independent-user");
+    let mut message = protocol_client_run("continue", message_id);
     let Some(pb::agent_client_message::Message::RunRequest(request)) = message.message.as_mut()
     else {
         unreachable!()
@@ -698,6 +721,7 @@ async fn assert_run_starts_without_parent_dependency(
     .await
     .unwrap();
     assert_eq!(row, ("root".into(), None, None));
+    (directory, store)
 }
 
 fn client_run() -> pb::AgentClientMessage {

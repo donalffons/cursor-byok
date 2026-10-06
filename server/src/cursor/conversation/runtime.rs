@@ -636,6 +636,7 @@ fn spawn_run_request(
             _ = generation.superseded.cancelled() => return,
             prepared = compile::prepare(
                 handle.request_id(),
+                handle.parent().map(|parent| parent.tool_call_id.as_str()),
                 &request,
                 compile::PrepareDependencies {
                     compiler: &dependencies.compiler,

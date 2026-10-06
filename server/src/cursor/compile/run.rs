@@ -56,6 +56,7 @@ pub(crate) struct PrepareDependencies<'a> {
 
 pub(crate) async fn prepare(
     request_id: &str,
+    parent_tool_call_id: Option<&str>,
     request: &pb::AgentRunRequest,
     dependencies: PrepareDependencies<'_>,
 ) -> Result<(PreparedRun, CursorRunContext)> {
@@ -133,7 +134,7 @@ pub(crate) async fn prepare(
         starts_turn,
         compacting,
         background_completion,
-    } = action(request)?;
+    } = action(request, parent_tool_call_id)?;
     let checkpoint_mode = if request.subagent_type_name.is_some() {
         Mode::Subagent
     } else {
@@ -399,7 +400,10 @@ fn execution_run_id(request_id: &str) -> RunId {
     RunId::new(format!("{request_id}:{}", &execution_id[..8]))
 }
 
-fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+fn action(
+    request: &pb::AgentRunRequest,
+    parent_tool_call_id: Option<&str>,
+) -> Result<ActionProjection> {
     let conversation_mode = request
         .conversation_state
         .as_ref()
@@ -431,11 +435,7 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
             } else {
                 user.mode
             };
-            if user.message_id.is_empty() {
-                return Err(Error::Protocol(
-                    "Cursor user message action has no message_id".into(),
-                ));
-            }
+            let input_id = input_id(user, parent_tool_call_id)?;
             if user.text.trim() == "/summarize" {
                 return Ok(ActionProjection {
                     mode,
@@ -461,7 +461,6 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
                     .filter(|text| !text.is_empty())
                     .cloned(),
             );
-            let input_id = format!("cursor:user:{}", user.message_id);
             Ok(ActionProjection {
                 mode,
                 turn_user: Some(user.clone()),
@@ -508,6 +507,20 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
             compacting: false,
             background_completion: false,
         }),
+    }
+}
+
+/// Identifies a user input so Cursor's retries of it reuse one Conversation base.
+/// Cursor's durable Task runner (subagents started from a side chat) sends the
+/// subagent's prompt without a `message_id`; its Task tool call id is unique
+/// per launch or resume and stable across retries, so it identifies the input.
+fn input_id(user: &pb::UserMessage, parent_tool_call_id: Option<&str>) -> Result<String> {
+    match (user.message_id.as_str(), parent_tool_call_id) {
+        ("", Some(tool_call_id)) => Ok(format!("cursor:task:{tool_call_id}")),
+        ("", None) => Err(Error::Protocol(
+            "Cursor user message action has no message_id".into(),
+        )),
+        (message_id, _) => Ok(format!("cursor:user:{message_id}")),
     }
 }
 
