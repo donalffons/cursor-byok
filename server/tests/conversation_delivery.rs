@@ -345,6 +345,65 @@ async fn background_shell_completion_wakes_the_parent_with_the_captured_notifica
     assert_eq!(metadata.task_id.as_deref(), Some("977679"));
 }
 
+#[tokio::test]
+async fn background_shell_output_match_wakes_the_parent_without_a_finish() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(stop_response("shell-progress", "The run edited a file."));
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    let registry = TransportRegistry::new(
+        store,
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    );
+    let handle = registry
+        .get_or_create("shell-progress-request")
+        .await
+        .unwrap();
+    drive_completion(
+        &handle,
+        shell_notification_run(
+            pb::ConversationStateStructure {
+                mode: Some(pb::AgentMode::Agent as i32),
+                ..Default::default()
+            },
+            pb::BackgroundTaskCompletion {
+                task_id: "582975:task_progress:1".into(),
+                kind: pb::BackgroundTaskKind::Shell as i32,
+                status: pb::BackgroundTaskStatus::Success as i32,
+                title: "21:24:02 TOOL edit: {\"path\": \"spec.mdx\"}".into(),
+                detail: Some("Output matched /TOOL edit/.".into()),
+                output_path: Some("/tmp/582975.txt".into()),
+                reason: pb::BackgroundTaskCompletionReason::TaskProgress as i32,
+                tool_call_id: Some("shell-call".into()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+
+    let requests = provider.requests();
+    let [runtime] = requests[0].history.as_slice() else {
+        panic!("Shell progress Run must add exactly one runtime message")
+    };
+    let ProjectedContent::Parts(parts) = &runtime.content else {
+        panic!("Shell progress context must be text")
+    };
+    let [ContentPart::Text { text }] = parts.as_slice() else {
+        panic!("Shell progress context must have one text part")
+    };
+    assert!(text.contains("The following task has notified."));
+    assert!(!text.contains("has finished"));
+    assert!(text.contains("task_id: 582975:task_progress:1"));
+    assert!(text.contains("detail: Output matched /TOOL edit/."));
+    assert!(text.contains(SHELL_FOLLOW_UP));
+}
+
 async fn drive_completion(
     handle: &TransportHandle,
     message: pb::AgentClientMessage,
@@ -602,6 +661,26 @@ fn completion_run_with_detail(
 fn shell_completion_run(
     conversation_state: pb::ConversationStateStructure,
 ) -> pb::AgentClientMessage {
+    shell_notification_run(
+        conversation_state,
+        pb::BackgroundTaskCompletion {
+            task_id: "977679".into(),
+            kind: pb::BackgroundTaskKind::Shell as i32,
+            status: pb::BackgroundTaskStatus::Aborted as i32,
+            title: "Start Python HTTP server on 9000".into(),
+            detail: Some("terminated_by_user".into()),
+            output_path: Some("/tmp/977679.txt".into()),
+            reason: pb::BackgroundTaskCompletionReason::TaskFinished as i32,
+            tool_call_id: Some("shell-call".into()),
+            ..Default::default()
+        },
+    )
+}
+
+fn shell_notification_run(
+    conversation_state: pb::ConversationStateStructure,
+    completion: pb::BackgroundTaskCompletion,
+) -> pb::AgentClientMessage {
     pb::AgentClientMessage {
         message: Some(pb::agent_client_message::Message::RunRequest(
             pb::AgentRunRequest {
@@ -609,17 +688,7 @@ fn shell_completion_run(
                     action: Some(
                         pb::conversation_action::Action::BackgroundTaskCompletionAction(
                             pb::BackgroundTaskCompletionAction {
-                                completions: vec![pb::BackgroundTaskCompletion {
-                                    task_id: "977679".into(),
-                                    kind: pb::BackgroundTaskKind::Shell as i32,
-                                    status: pb::BackgroundTaskStatus::Aborted as i32,
-                                    title: "Start Python HTTP server on 9000".into(),
-                                    detail: Some("terminated_by_user".into()),
-                                    output_path: Some("/tmp/977679.txt".into()),
-                                    reason: pb::BackgroundTaskCompletionReason::TaskFinished as i32,
-                                    tool_call_id: Some("shell-call".into()),
-                                    ..Default::default()
-                                }],
+                                completions: vec![completion],
                             },
                         ),
                     ),

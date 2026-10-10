@@ -56,11 +56,17 @@ pub(super) fn project(
                     completion.reason
                 ))
             })?;
-        if reason != pb::BackgroundTaskCompletionReason::TaskFinished {
-            // Progress and reparenting notifications are informational; the
-            // client batches them together with the real finish notification.
-            continue;
-        }
+        // Cursor sends TASK_PROGRESS on its own, e.g. when a background Shell's
+        // output matches notify_on_output. Each one carries a unique task_id.
+        let progress = match reason {
+            pb::BackgroundTaskCompletionReason::TaskFinished => false,
+            pb::BackgroundTaskCompletionReason::TaskProgress => true,
+            pb::BackgroundTaskCompletionReason::Unspecified => {
+                return Err(Error::Protocol(
+                    "background task completion has unspecified reason".into(),
+                ))
+            }
+        };
         if completion.task_id.is_empty() || completion.title.is_empty() {
             return Err(Error::Protocol(
                 "background task completion requires task_id and title".into(),
@@ -96,7 +102,7 @@ pub(super) fn project(
             })?;
         let task_identity = agent_id.unwrap_or(&completion.task_id);
         let identity = format!("{}:{task_identity}:{tool_call_id}", kind.as_str_name());
-        let context = completion_context(completion, kind, agent_id)?;
+        let context = completion_context(completion, kind, agent_id, progress)?;
         if completions
             .insert(identity.clone(), (completion, context))
             .is_some()
@@ -107,9 +113,10 @@ pub(super) fn project(
         }
     }
 
-    let (first, _) = completions.values().next().ok_or_else(|| {
-        Error::Protocol("background task notification contains no finished task".into())
-    })?;
+    let (first, _) = completions
+        .values()
+        .next()
+        .ok_or_else(|| Error::Protocol("background task notification contains no task".into()))?;
     let text = match (has_shell, has_subagent) {
         (true, false) => SHELL_FOLLOW_UP.into(),
         (false, true) => FOLLOW_UP.into(),
@@ -160,8 +167,15 @@ fn completion_context(
     completion: &pb::BackgroundTaskCompletion,
     kind: pb::BackgroundTaskKind,
     agent_id: Option<&str>,
+    progress: bool,
 ) -> Result<String> {
     let status = status(completion)?;
+    // Same wording as Cursor's local agent runtime.
+    let header = if progress {
+        "The following task has notified."
+    } else {
+        "The following task has finished."
+    };
     let mut fields = vec![
         format!(
             "kind: {}",
@@ -189,7 +203,7 @@ fn completion_context(
     );
     optional_field(&mut fields, "thread_id", completion.thread_id.as_deref());
     Ok(format!(
-        "<system_notification>\nThe following task has finished. If you were already aware, ignore this notification and do not restate prior responses.\n\n<task>\n{}\n</task>\n</system_notification>",
+        "<system_notification>\n{header} If you were already aware, ignore this notification and do not restate prior responses.\n\n<task>\n{}\n</task>\n</system_notification>",
         fields.join("\n")
     ))
 }
