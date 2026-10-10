@@ -44,6 +44,7 @@ impl App {
             plugin_runtime.clone(),
             config.app_version.clone(),
         )?;
+        plugins.spawn_resource_refresh();
         let clients = crate::network::NetworkClients::new(store.clone());
         let provider = std::sync::Arc::new(ProviderRouter::new(
             store.clone(),

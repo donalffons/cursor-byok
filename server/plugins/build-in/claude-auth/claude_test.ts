@@ -20,6 +20,7 @@ import { claudeOAuth } from "./oauth.ts";
 import { claudeAccounts } from "./resources.ts";
 import { claudeModels } from "./models.ts";
 import { claudeProvider, retryAtMs } from "./provider.ts";
+import { parseUsage } from "./usage.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
   if (!condition) throw new Error(message);
@@ -89,6 +90,35 @@ function tokens(extra: Record<string, unknown> = {}) {
     account: { uuid: "account", email_address: "person@example.com" },
     organization: { uuid: "org" },
     ...extra,
+  };
+}
+/** Trimmed real `/api/oauth/usage` response. */
+function usage() {
+  return {
+    five_hour: { utilization: 18.0, resets_at: "2026-10-08T21:59:59.957393+00:00" },
+    limits: [
+      {
+        kind: "session",
+        group: "session",
+        percent: 18,
+        resets_at: "2026-10-08T21:59:59.957393+00:00",
+        scope: null,
+      },
+      {
+        kind: "weekly_all",
+        group: "weekly",
+        percent: 23,
+        resets_at: "2026-10-15T06:59:59.957415+00:00",
+        scope: null,
+      },
+      {
+        kind: "weekly_scoped",
+        group: "weekly",
+        percent: 11,
+        resets_at: "2026-10-15T06:59:59.957625+00:00",
+        scope: { model: { id: null, display_name: "Opus" }, surface: null },
+      },
+    ],
   };
 }
 function request(): LlmRequest {
@@ -454,15 +484,96 @@ Deno.test("model sync refuses to rotate unpersistable credentials or fabricate a
   );
 });
 
-Deno.test("manual refresh persists rotated tokens and marks only invalid grants invalid", async () => {
+Deno.test("refresh reads usage without rotating fresh tokens", async () => {
+  const urls: string[] = [];
+  const snapshot = resource();
+  const refreshed = await claudeAccounts.refresh!(
+    snapshot,
+    context({
+      fetch: (url, init) => {
+        urls.push(url);
+        equal(init?.headers?.["user-agent"]?.startsWith("claude-code/"), true);
+        return response(usage());
+      },
+    }),
+  );
+  equal(urls, ["https://api.anthropic.com/api/oauth/usage"]);
+  equal(refreshed.state, { status: "ready" });
+  const data = refreshed.privateData as Record<string, JsonValue>;
+  equal(data.accessToken, (snapshot.privateData as Record<string, JsonValue>).accessToken);
+  const view = claudeAccounts.present({ ...snapshot, privateData: refreshed.privateData! });
+  equal(view.metrics?.map((metric) => [metric.id, metric.value]), [
+    ["session", 82],
+    ["weekly_all", 77],
+    ["weekly_scoped:Opus", 89],
+  ]);
+  equal(view.metrics?.[0].resetAtMs, Date.parse("2026-10-08T21:59:59.957393+00:00"));
+});
+
+Deno.test("refresh rotates expiring tokens and keeps them when usage fails", async () => {
+  const fetches: string[] = [];
+  const refreshed = await claudeAccounts.refresh!(
+    resource(true),
+    context({
+      fetch: (url) => {
+        fetches.push(url);
+        return url === TOKEN_URL ? response(tokens()) : response({}, 429);
+      },
+    }),
+  );
+  equal(fetches, [TOKEN_URL, "https://api.anthropic.com/api/oauth/usage"]);
+  equal((refreshed.privateData as Record<string, JsonValue>).refreshToken, "new-refresh-secret");
+  equal(refreshed.state, undefined);
+});
+
+Deno.test("refresh retries usage once after a rejected access token", async () => {
+  let usageCalls = 0;
   const refreshed = await claudeAccounts.refresh!(
     resource(),
-    context({ fetch: () => response(tokens()) }),
+    context({
+      fetch: (url) => {
+        if (url === TOKEN_URL) return response(tokens());
+        usageCalls++;
+        return usageCalls === 1 ? response({}, 401) : response(usage());
+      },
+    }),
   );
+  equal(usageCalls, 2);
   equal(refreshed.state, { status: "ready" });
-  assert(refreshed.privateData);
-  const invalid = await claudeAccounts.refresh!(
+  equal((refreshed.privateData as Record<string, JsonValue>).accessToken, "new-access-secret");
+});
+
+Deno.test("refresh cools an account whose all-model limit is exhausted", async () => {
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+  const refreshed = await claudeAccounts.refresh!(
     resource(),
+    context({
+      fetch: () =>
+        response({
+          limits: [
+            { kind: "session", percent: 100, resets_at: resetsAt, scope: null },
+            {
+              kind: "weekly_scoped",
+              percent: 100,
+              resets_at: new Date(Date.now() + 9_000_000).toISOString(),
+              scope: { model: { display_name: "Opus" } },
+            },
+          ],
+        }),
+    }),
+  );
+  equal(refreshed.state?.status, "cooling");
+  equal(refreshed.state?.status === "cooling" && refreshed.state.retryAtMs, Date.parse(resetsAt));
+});
+
+Deno.test("token rotation keeps the last usage reading", () => {
+  const data = { ...accountData(resource()), quota: parseUsage(usage(), 1) };
+  equal(parseTokens(tokens(), data).quota, data.quota);
+});
+
+Deno.test("refresh marks only invalid grants invalid", async () => {
+  const invalid = await claudeAccounts.refresh!(
+    resource(true),
     context({ fetch: () => response({ error: "invalid_grant" }, 400) }),
   );
   equal(invalid.state?.status, "invalid");

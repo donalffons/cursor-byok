@@ -1349,6 +1349,11 @@
       "placeholders": [],
       "refs": [
         {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 65,
+          "column": 111
+        },
+        {
           "file": "features/plugins/PluginResourcePanels.tsx",
           "line": 488,
           "column": 81
@@ -1415,6 +1420,18 @@
           "file": "features/settings/SettingsPage.tsx",
           "line": 241,
           "column": 27
+        }
+      ]
+    },
+    "354d1f2c2a3c38a9": {
+      "source": "订阅额度",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 73,
+          "column": 55
         }
       ]
     },
@@ -2198,6 +2215,20 @@
           "file": "features/settings/SettingsPage.tsx",
           "line": 177,
           "column": 26
+        }
+      ]
+    },
+    "54a7f038ca64e0bf": {
+      "source": "重置于 {time}",
+      "kind": "template",
+      "placeholders": [
+        "time"
+      ],
+      "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 58,
+          "column": 8
         }
       ]
     },
@@ -3771,6 +3802,20 @@
         }
       ]
     },
+    "9b4933f8a5ac8b28": {
+      "source": "剩余 {percent}%",
+      "kind": "template",
+      "placeholders": [
+        "percent"
+      ],
+      "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 52,
+          "column": 39
+        }
+      ]
+    },
     "9b9bc9cd7c76406f": {
       "source": "打开授权网页",
       "kind": "text",
@@ -4724,6 +4769,11 @@
       "kind": "text",
       "placeholders": [],
       "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 64,
+          "column": 111
+        },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
           "line": 485,
@@ -6386,7 +6436,7 @@
       "refs": [
         {
           "file": "features/home/HomePage.tsx",
-          "line": 201,
+          "line": 215,
           "column": 25
         }
       ]

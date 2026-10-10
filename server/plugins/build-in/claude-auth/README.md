@@ -16,7 +16,8 @@ server/
 │   ├── main.ts                   Provider and account registration
 │   ├── oauth.ts                  Browser authorization and host-owned PKCE/callback integration
 │   ├── auth.ts                   Token validation, account identity, and refresh coordination
-│   ├── resources.ts              Safe account presentation and manual credential refresh
+│   ├── resources.ts              Safe account presentation and usage/credential refresh
+│   ├── usage.ts                  Subscription usage lookup, quota metrics, and limit cooling
 │   ├── models.ts                 Paginated API model discovery and capability metadata
 │   ├── provider.ts               Invocation, credential patches, and error/limit classification
 │   ├── messages.ts               Messages serialization, streaming, and signed-thinking replay
@@ -30,8 +31,8 @@ server/
     └── worker.rs                 Keeps auxiliary HTTP fetches out of model-call recording
 ```
 
-No frontend, database schema, or provider-independent conversation changes are required. Existing
-modules are not moved or deleted.
+No database schema or provider-independent conversation changes are required. Existing modules are
+not moved or deleted.
 
 ## Authentication and invocation
 
@@ -56,6 +57,13 @@ Model invocation
   → text / thinking / tool events → host → Cursor
   → terminal result includes rotated credentials, even on handled inference errors
   → host applies the credential/state patch
+
+Usage refresh (host loop every 60 s, or the account's Refresh button)
+  → plugin rotates credentials only if they expire soon, or once after a usage 401
+  → /api/oauth/usage → `limits[]` (5-hour session, weekly all-models, weekly per-model)
+  → private `quota` + cooling while an all-models limit is used up
+  → host applies the patch only if the account did not change meanwhile
+  → account metrics: remaining percent and reset time per limit
 ```
 
 - Authorization/token constants match inspected Claude Code and current public client
@@ -85,10 +93,13 @@ Model invocation
   explains itself.
 - Usage reports `contextInputTokens` (uncached + cache read + cache write) because Anthropic's
   `input_tokens` excludes the cache; the host's automatic compaction is driven by that total.
-- No static model fallback, credential-file import, API-key fallback, or usage-quota estimation is
-  provided. Available models are exactly what the upstream catalog returns; entitlement can still
-  differ at inference time. The fast-latency hint is not mapped to an unverified subscription
-  feature.
+- Quota comes from the undocumented `/api/oauth/usage` endpoint that Claude Code's `/usage` reads.
+  It rate-limits unknown clients, so the request identifies as `claude-code/<version>`. A failed
+  lookup keeps the previous quota.
+- No static model fallback, credential-file import, API-key fallback, or local usage-quota
+  estimation is provided. Available models are exactly what the upstream catalog returns;
+  entitlement can still differ at inference time. The fast-latency hint is not mapped to an
+  unverified subscription feature.
 
 ## Upstream compatibility limitation
 

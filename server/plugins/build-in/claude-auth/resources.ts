@@ -1,6 +1,15 @@
-import type { ResourceSupport, ResourceView } from "cursor-byok:resource";
-import { accountData, OAuthError, privateData, refreshTokens, RESOURCE_TYPE } from "./auth.ts";
+import type { ResourcePatch, ResourceSupport, ResourceView } from "cursor-byok:resource";
+import {
+  type AccountData,
+  accountData,
+  isExpiring,
+  OAuthError,
+  privateData,
+  refreshTokens,
+  RESOURCE_TYPE,
+} from "./auth.ts";
 import { claudeOAuth } from "./oauth.ts";
+import { fetchUsage, quotaMetrics, quotaState, UsageError } from "./usage.ts";
 
 export const claudeAccounts: ResourceSupport = {
   type: RESOURCE_TYPE,
@@ -8,6 +17,7 @@ export const claudeAccounts: ResourceSupport = {
   add: [claudeOAuth],
   present(resource): ResourceView {
     const data = accountData(resource);
+    const metrics = quotaMetrics(data.quota);
     return {
       displayName: data.displayName,
       description: {
@@ -15,17 +25,41 @@ export const claudeAccounts: ResourceSupport = {
         "ru-RU": "Полноценный аккаунт подписки Claude.",
         "zh-CN": "完整的 Claude 订阅账号。",
       },
+      ...(metrics.length > 0 ? { metrics } : {}),
     };
   },
-  async refresh(resource, context) {
-    const data = accountData(resource);
+  /**
+   * Reads subscription usage. Tokens rotate only when they expire or the usage endpoint
+   * rejects them, so periodic refreshes do not churn refresh tokens.
+   */
+  async refresh(resource, context): Promise<ResourcePatch> {
+    let data: AccountData = accountData(resource);
+    let rotated = false;
+    const rotate = async () => {
+      data = await refreshTokens(data, context);
+      rotated = true;
+    };
     try {
-      const refreshed = await refreshTokens(data, context);
-      return { privateData: privateData(refreshed), state: { status: "ready" } };
+      if (isExpiring(data)) await rotate();
+      let quota;
+      try {
+        quota = await fetchUsage(data.accessToken, context);
+      } catch (error) {
+        if (!(error instanceof UsageError) || error.status !== 401 || rotated) throw error;
+        await rotate();
+        quota = await fetchUsage(data.accessToken, context);
+      }
+      return { privateData: privateData({ ...data, quota }), state: quotaState(quota) };
     } catch (error) {
       if (error instanceof OAuthError && error.invalidCredentials) {
         return { state: { status: "invalid", message: error.message } };
       }
+      if (error instanceof UsageError && error.status === 401) {
+        const message = "Claude authorization was rejected. Sign in again.";
+        return { privateData: privateData(data), state: { status: "invalid", message } };
+      }
+      // Rotated tokens must persist even when the usage lookup fails; the old ones are revoked.
+      if (rotated) return { privateData: privateData(data) };
       throw error;
     }
   },

@@ -19,7 +19,10 @@ use super::{
     },
     oauth_callback::{self, CallbackHandle, CallbackOutcome, CallbackRequest},
     runtime::PluginRuntime,
-    state::{now_ms, PluginStateStore, ResourceDraft, ResourcePatch, ResourceRecord, StoredModel},
+    state::{
+        now_ms, PluginStateStore, ResourceDraft, ResourcePatch, ResourceRecord, ResourceState,
+        StoredModel,
+    },
     wire,
     worker::{PluginWorker, WorkerStreamItem},
 };
@@ -33,6 +36,8 @@ use crate::{
 
 const OAUTH_SLOW_DOWN_STEP_MS: i64 = 5_000;
 const MAX_IMPORT_DRAFTS: usize = 256;
+/// How often account quotas and credential states are re-read from upstream.
+const RESOURCE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct PluginRegistry {
@@ -146,6 +151,19 @@ impl PluginRegistry {
                 oauth_sessions: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Starts the process-lifetime loop that refreshes all plugin resources, first immediately.
+    pub fn spawn_resource_refresh(&self) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(RESOURCE_REFRESH_INTERVAL);
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticks.tick().await;
+                registry.refresh_all_resources().await;
+            }
+        });
     }
 
     pub async fn plugins(&self) -> Vec<PluginDescriptor> {
@@ -820,8 +838,56 @@ impl PluginRegistry {
         let record = self
             .find_record(plugin_id, resource_type, resource_id)
             .await?;
+        self.refresh_record(&entry, &executable, resource_type, &record)
+            .await
+    }
+
+    /// Refreshes every refreshable resource of every plugin, e.g. to keep quotas current.
+    /// Invalid resources are skipped: they need the user to sign in again.
+    pub async fn refresh_all_resources(&self) {
+        let Some(executable) = self.inner.runtime.executable() else {
+            return;
+        };
+        for entry in self.entries(&executable).await {
+            let plugin_id = &entry.manifest.id;
+            for definition in entry
+                .definition
+                .resources
+                .iter()
+                .filter(|definition| definition.can_refresh)
+            {
+                let resource_type = &definition.resource_type;
+                let records = match self.inner.state.resources(plugin_id, resource_type).await {
+                    Ok(records) => records,
+                    Err(error) => {
+                        tracing::warn!(plugin = %plugin_id, %error, "cannot read plugin resources");
+                        continue;
+                    }
+                };
+                for record in records
+                    .iter()
+                    .filter(|record| !matches!(record.state, ResourceState::Invalid { .. }))
+                {
+                    if let Err(error) = self
+                        .refresh_record(&entry, &executable, resource_type, record)
+                        .await
+                    {
+                        tracing::debug!(plugin = %plugin_id, resource = %record.id, %error, "periodic plugin resource refresh failed");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn refresh_record(
+        &self,
+        entry: &PluginEntry,
+        executable: &Path,
+        resource_type: &str,
+        record: &ResourceRecord,
+    ) -> Result<()> {
         let value = self
-            .worker(&entry, &executable)
+            .worker(entry, executable)
             .await
             .invoke(
                 "resource.refresh",
@@ -833,10 +899,15 @@ impl PluginRegistry {
             )
             .await?;
         let patch: ResourcePatch = serde_json::from_value(value)?;
-        self.inner
+        let applied = self
+            .inner
             .state
-            .apply_patch(plugin_id, resource_type, resource_id, patch)
-            .await
+            .apply_patch_if_current(&entry.manifest.id, resource_type, record, patch)
+            .await?;
+        if !applied {
+            tracing::debug!(plugin = %entry.manifest.id, resource = %record.id, "discarded refresh of a resource changed meanwhile");
+        }
+        Ok(())
     }
 
     pub async fn resource_action(

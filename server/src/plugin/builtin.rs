@@ -190,6 +190,10 @@ const CLAUDE_AUTH: &[(&str, &str)] = &[
         include_str!("../../plugins/build-in/claude-auth/resources.ts"),
     ),
     (
+        "usage.ts",
+        include_str!("../../plugins/build-in/claude-auth/usage.ts"),
+    ),
+    (
         "models.ts",
         include_str!("../../plugins/build-in/claude-auth/models.ts"),
     ),

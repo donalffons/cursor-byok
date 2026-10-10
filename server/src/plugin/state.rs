@@ -1,5 +1,8 @@
 //! Owns core-side persistence of plugin resources and model catalogs.
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use super::data::PluginDataStore;
 use crate::{Error, Result};
@@ -210,6 +213,8 @@ impl StoredModel {
 #[derive(Clone)]
 pub struct PluginStateStore {
     data: PluginDataStore,
+    /// Serializes read-modify-write of resource lists so concurrent patches cannot drop each other.
+    resource_writes: Arc<Mutex<()>>,
 }
 
 pub struct UpsertOutcome {
@@ -219,7 +224,10 @@ pub struct UpsertOutcome {
 
 impl PluginStateStore {
     pub fn new(data: PluginDataStore) -> Self {
-        Self { data }
+        Self {
+            data,
+            resource_writes: Arc::default(),
+        }
     }
 
     pub async fn resources(
@@ -243,6 +251,7 @@ impl PluginStateStore {
         resource_type: &str,
         drafts: Vec<ResourceDraft>,
     ) -> Result<UpsertOutcome> {
+        let _write = self.resource_writes.lock().await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let now = now_ms();
         let mut outcome = UpsertOutcome {
@@ -288,20 +297,39 @@ impl PluginStateStore {
         resource_id: &str,
         patch: ResourcePatch,
     ) -> Result<()> {
+        let _write = self.resource_writes.lock().await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let record = records
             .iter_mut()
             .find(|record| record.id == resource_id)
             .ok_or_else(|| Error::RunNotFound(format!("plugin resource {resource_id}")))?;
-        if let Some(private_data) = patch.private_data {
-            record.private_data = private_data;
-        }
-        if let Some(state) = patch.state {
-            record.state = state.into();
-        }
-        record.updated_at_ms = now_ms();
+        patch_record(record, patch);
         self.save_resources(plugin_id, resource_type, &records)
             .await
+    }
+
+    /// Applies a patch computed from `expected` only while the stored record still matches it,
+    /// so a slow refresh cannot overwrite credentials another writer replaced meanwhile.
+    pub async fn apply_patch_if_current(
+        &self,
+        plugin_id: &str,
+        resource_type: &str,
+        expected: &ResourceRecord,
+        patch: ResourcePatch,
+    ) -> Result<bool> {
+        let _write = self.resource_writes.lock().await;
+        let mut records = self.resources(plugin_id, resource_type).await?;
+        let Some(record) = records.iter_mut().find(|record| {
+            record.id == expected.id
+                && record.updated_at_ms == expected.updated_at_ms
+                && record.private_data == expected.private_data
+        }) else {
+            return Ok(false);
+        };
+        patch_record(record, patch);
+        self.save_resources(plugin_id, resource_type, &records)
+            .await?;
+        Ok(true)
     }
 
     pub async fn remove_resource(
@@ -310,6 +338,7 @@ impl PluginStateStore {
         resource_type: &str,
         resource_id: &str,
     ) -> Result<ResourceRecord> {
+        let _write = self.resource_writes.lock().await;
         let mut records = self.resources(plugin_id, resource_type).await?;
         let index = records
             .iter()
@@ -397,6 +426,16 @@ impl PluginStateStore {
     }
 }
 
+fn patch_record(record: &mut ResourceRecord, patch: ResourcePatch) {
+    if let Some(private_data) = patch.private_data {
+        record.private_data = private_data;
+    }
+    if let Some(state) = patch.state {
+        record.state = state.into();
+    }
+    record.updated_at_ms = now_ms();
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -473,6 +512,46 @@ mod tests {
         let records = store.resources("dev.example", "account").await.unwrap();
         assert!(!records[0].state.is_ready(100));
         assert!(records[0].state.is_ready(300), "cooling expires over time");
+    }
+
+    #[tokio::test]
+    async fn conditional_patch_skips_a_record_changed_since_its_snapshot() {
+        let (_root, store) = store();
+        let draft = |token: &str| ResourceDraft {
+            key: "acct-1".into(),
+            private_data: serde_json::json!({ "token": token }),
+            state: None,
+        };
+        store
+            .upsert_resources("dev.example", "account", vec![draft("old")])
+            .await
+            .unwrap();
+        let snapshot = store.resources("dev.example", "account").await.unwrap()[0].clone();
+        store
+            .upsert_resources("dev.example", "account", vec![draft("rotated")])
+            .await
+            .unwrap();
+        let stale = ResourcePatch {
+            private_data: Some(serde_json::json!({ "token": "old", "quota": 1 })),
+            state: None,
+        };
+        assert!(!store
+            .apply_patch_if_current("dev.example", "account", &snapshot, stale)
+            .await
+            .unwrap());
+        let current = store.resources("dev.example", "account").await.unwrap()[0].clone();
+        assert_eq!(current.private_data["token"], "rotated");
+
+        let fresh = ResourcePatch {
+            private_data: Some(serde_json::json!({ "token": "rotated", "quota": 2 })),
+            state: None,
+        };
+        assert!(store
+            .apply_patch_if_current("dev.example", "account", &current, fresh)
+            .await
+            .unwrap());
+        let records = store.resources("dev.example", "account").await.unwrap();
+        assert_eq!(records[0].private_data["quota"], 2);
     }
 
     #[tokio::test]

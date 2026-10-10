@@ -3,6 +3,7 @@ import { api, pluginText, type Overview } from "../../shared/api";
 import { ContributionCalendarChart } from "./charts/ContributionCalendarChart";
 import { DailyTokenUsageChart } from "./charts/DailyTokenUsageChart";
 import { HomeMetrics } from "./metrics/HomeMetrics";
+import { QuotaOverview, quotaAccounts } from "./quota/QuotaOverview";
 import { PageContent } from "../../shell/layout/PageContent";
 import type { VirtualPageSection } from "../../shell/layout/VirtualPage";
 import { OverviewTimeRangeFilter, type OverviewRangePreset, type QuickPreset } from "./overview/OverviewTimeRangeFilter";
@@ -16,6 +17,8 @@ import { useI18n } from "../../i18n/store";
 type TimeRange = { startMs: number; endMs: number };
 
 const CALENDAR_DAYS = 365;
+/** The server re-reads quotas from upstream every minute; this only re-reads the local result. */
+const QUOTA_POLL_MS = 30_000;
 const DAY_MS = 24 * 60 * 60_000;
 
 function contributionCalendarData(overview: Overview, endMs: number) {
@@ -67,6 +70,12 @@ export function HomePage() {
   const [rangeBusy, setRangeBusy] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const selectedRange = preset === "custom" ? customRange : presetRange(preset);
+  const quota = quotaAccounts(plugins);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => void appStore.refreshPlugins(), QUOTA_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!selectedRange) return;
@@ -158,6 +167,11 @@ export function HomePage() {
     )),
   ];
   const sections: VirtualPageSection[] = [
+    ...(quota.length > 0 ? [{
+      key: "subscription-quota",
+      estimatedHeight: 160,
+      content: <QuotaOverview accounts={quota} />,
+    }] : []),
     {
       key: "daily-token-usage",
       estimatedHeight: 240,

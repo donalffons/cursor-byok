@@ -1,5 +1,6 @@
 import type { JsonValue, PluginContext } from "cursor-byok:plugin";
 import type { ResourceSnapshot } from "cursor-byok:resource";
+import type { AccountQuota } from "./usage.ts";
 
 export const RESOURCE_TYPE = "claude-account";
 export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -13,6 +14,8 @@ export type AccountData = {
   accountId: string;
   organizationId: string;
   displayName: string;
+  /** Last subscription usage read by a refresh; absent until the first refresh. */
+  quota?: AccountQuota;
 };
 
 export function object(value: unknown): Record<string, unknown> | null {
@@ -133,6 +136,7 @@ export function parseTokens(
     accountId,
     organizationId,
     displayName: text(account?.email_address) ?? previous?.displayName ?? accountId,
+    ...(previous?.quota ? { quota: previous.quota } : {}),
   };
 }
 

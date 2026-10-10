@@ -1,0 +1,116 @@
+@use "../../../styles/typography" as type;
+
+.root {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.account {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--vscode-sideBar-border);
+  border-radius: var(--oa-overlay-radius);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.identity {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  strong,
+  span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong {
+    color: var(--vscode-foreground);
+    font-size: type.$font-size-base;
+    font-weight: 600;
+  }
+
+  span {
+    color: var(--vscode-descriptionForeground);
+    font-size: type.$font-size-xs;
+  }
+}
+
+.cooling,
+.invalid {
+  flex: 0 0 auto;
+  font-size: type.$font-size-xs;
+}
+
+.cooling {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.invalid {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metricHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--vscode-foreground);
+  font-size: type.$font-size-xs;
+}
+
+.value {
+  flex: 0 0 auto;
+  font-family: var(--oa-number-font);
+}
+
+.bar {
+  height: 4px;
+  overflow: hidden;
+  background: var(--vscode-input-background);
+  border-radius: 2px;
+}
+
+.fill {
+  height: 100%;
+  background: var(--vscode-testing-iconPassed, #73c991);
+  border-radius: 2px;
+  transition: width 300ms ease;
+
+  &.low {
+    background: var(--vscode-editorWarning-foreground, #cca700);
+  }
+
+  &.critical {
+    background: var(--vscode-errorForeground, #f48771);
+  }
+}
+
+.reset {
+  color: var(--vscode-descriptionForeground);
+  font-size: type.$font-size-2xs;
+}
