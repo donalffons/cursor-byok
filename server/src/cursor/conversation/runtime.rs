@@ -30,11 +30,17 @@ pub struct ConversationRuntime;
 
 const CONTINUATION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// `CancelAction.reason` Cursor sends when the user presses stop. Cursor sends
+/// other reasons, such as `new_message_submitted`, when it cancels a turn but
+/// keeps it in the chat.
+const USER_STOP_REASON: &str = "user_stopped_generation";
+
 #[derive(Clone)]
 struct RunGeneration {
     id: u64,
     request: pb::AgentRunRequest,
     superseded: CancellationToken,
+    stopped_by_user: CancellationToken,
     finished: CancellationToken,
     run: Arc<parking_lot::Mutex<Option<RunHandle>>>,
     results: ToolResultSender,
@@ -435,8 +441,13 @@ impl ConversationRuntime {
                                             )
                                             .await;
                                         }
-                                        Some(pb::conversation_action::Action::CancelAction(_)) => {
+                                        Some(pb::conversation_action::Action::CancelAction(
+                                            action,
+                                        )) => {
                                             if let Some(generation) = current.as_ref() {
+                                                if action.reason == USER_STOP_REASON {
+                                                    generation.stopped_by_user.cancel();
+                                                }
                                                 if let Some(run) = generation.run.lock().clone() {
                                                     run.cancel();
                                                 }
@@ -548,6 +559,7 @@ async fn start_generation(
         id: *next_generation,
         request: request.clone(),
         superseded: CancellationToken::new(),
+        stopped_by_user: CancellationToken::new(),
         finished: CancellationToken::new(),
         run: Arc::new(parking_lot::Mutex::new(None)),
         results,
@@ -648,7 +660,7 @@ fn spawn_run_request(
                 },
             ) => prepared,
         };
-        let (mut prepared, context) = match prepared {
+        let (mut prepared, mut context) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 if generation.superseded.is_cancelled() {
@@ -744,6 +756,9 @@ fn spawn_run_request(
                 .collect::<Vec<_>>();
             messages.extend(prepared.initial_messages);
             prepared.initial_messages = messages;
+            // Messages that arrived between runs ride on this turn; a stop
+            // must not withdraw them together with it.
+            context.withdrawable = false;
             if let Ok(checkpoint) = dependencies
                 .store
                 .ensure_conversation(&prepared.conversation_id)
@@ -780,6 +795,7 @@ fn spawn_run_request(
             registry.clone(),
             ConversationOutputDependencies {
                 superseded: generation.superseded.clone(),
+                stopped_by_user: generation.stopped_by_user.clone(),
                 tools: generation.tools.clone(),
                 results,
                 runtime_actions,

@@ -22,6 +22,8 @@ pub struct CheckpointBuilder {
     pub(super) store: Store,
     pub(super) sync: BlobSynchronizer,
     pub(super) parent_tool_call_id: Option<String>,
+    /// The state Cursor sent with the run request, before this turn.
+    pub(super) request: pb::ConversationStateStructure,
     pub(super) base: pb::ConversationStateStructure,
     pub(super) model: String,
     pub(super) max_context_tokens: Option<u64>,
@@ -42,11 +44,13 @@ impl CheckpointBuilder {
         parent_tool_call_id: Option<String>,
         base: Option<pb::ConversationStateStructure>,
     ) -> Self {
+        let request = base.unwrap_or_default();
         Self {
             store,
             sync,
             parent_tool_call_id,
-            base: base.unwrap_or_default(),
+            base: request.clone(),
+            request,
             model: String::new(),
             max_context_tokens: None,
             instructions: String::new(),

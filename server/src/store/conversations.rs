@@ -73,6 +73,33 @@ impl Store {
         Ok(CheckpointId(root))
     }
 
+    /// Moves the Conversation back to the checkpoint a finished Run started
+    /// from. Does nothing once another Run or append has moved the
+    /// Conversation past the Run's head. Checkpoints are immutable, so the
+    /// withdrawn messages stay on a branch nothing points to.
+    pub async fn withdraw_run(&self, run_id: &RunId) -> Result<bool> {
+        let _write = self.writes.lock().await;
+        let withdrawn = sqlx::query(
+            "UPDATE conversations
+             SET current_checkpoint_id = (SELECT base_checkpoint_id FROM runs WHERE run_id = ?),
+                 updated_at_ms = ?
+             WHERE conversation_id = (
+                     SELECT conversation_id FROM runs WHERE run_id = ? AND status <> 'running'
+                   )
+               AND current_checkpoint_id = (SELECT head_checkpoint_id FROM runs WHERE run_id = ?)
+               AND active_run_id IS NULL",
+        )
+        .bind(run_id.as_str())
+        .bind(now_ms())
+        .bind(run_id.as_str())
+        .bind(run_id.as_str())
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        Ok(withdrawn)
+    }
+
     pub(crate) async fn require_active_head_tx(
         tx: &mut Transaction<'_, Sqlite>,
         conversation_id: &ConversationId,

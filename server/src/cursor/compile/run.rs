@@ -43,6 +43,9 @@ pub struct CursorRunContext {
     pub checkpoint_prompt: PromptSpec,
     pub compacting: bool,
     pub background_completion: bool,
+    /// The run starts a turn from a message bubble that Cursor removes from
+    /// the chat when the user stops it before any visible output.
+    pub withdrawable: bool,
 }
 
 pub(crate) struct PrepareDependencies<'a> {
@@ -353,6 +356,7 @@ pub(crate) async fn prepare(
             checkpoint_prompt,
             compacting,
             background_completion,
+            withdrawable: starts_turn && !background_completion,
         },
     ))
 }

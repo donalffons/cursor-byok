@@ -11,7 +11,7 @@ use crate::{
         checkpoint::StepBuffer,
         checkpoint::{
             worker::{CheckpointJob, CheckpointKind, CheckpointWorker, FinalCheckpoints},
-            CheckpointBuilder,
+            CheckpointBuilder, PendingSteps,
         },
         compile::{
             compile_injection, compile_user_message_action, CursorRunContext, RuntimeAction,
@@ -54,6 +54,7 @@ pub struct ConversationOutput {
     injection_ids: HashSet<String>,
     pending_injections: HashMap<String, PendingInjection>,
     superseded: CancellationToken,
+    stopped_by_user: CancellationToken,
 }
 
 struct PendingInjection {
@@ -71,6 +72,7 @@ struct InjectionState<'a> {
 
 pub(crate) struct ConversationOutputDependencies {
     pub superseded: CancellationToken,
+    pub stopped_by_user: CancellationToken,
     pub tools: ToolDispatcher,
     pub results: ToolResultReceiver,
     pub checkpoint: CheckpointBuilder,
@@ -107,6 +109,7 @@ impl ConversationOutput {
             injection_ids: HashSet::new(),
             pending_injections: HashMap::new(),
             superseded: runtime.superseded,
+            stopped_by_user: runtime.stopped_by_user,
         }
     }
 
@@ -171,6 +174,10 @@ impl ConversationOutput {
         let mut context_tokens = None::<u64>;
         let mut ready = VecDeque::new();
         let mut presentation = StepBuffer::default();
+        // A turn the user stops before Cursor shows any output is withdrawn
+        // from the chat; these track whether that rule applies to this run.
+        let mut turn_started = false;
+        let mut visible_output = false;
 
         loop {
             if self.superseded.is_cancelled() {
@@ -253,6 +260,7 @@ impl ConversationOutput {
                 }
                 Input::Event(Some(event)) => match event {
                     RunEvent::AutoCompactionStarted => {
+                        visible_output = true;
                         self.handle.emit(&events::summary_started())?;
                     }
                     RunEvent::AutoCompactionCompleted => {
@@ -298,6 +306,7 @@ impl ConversationOutput {
                         }
                     }
                     RunEvent::TextDelta(delta) => {
+                        visible_output = true;
                         response_text.push_str(&delta);
                         if self.context.compacting {
                             self.handle.emit(&events::summary_delta(delta))?;
@@ -311,6 +320,7 @@ impl ConversationOutput {
                     }
                     RunEvent::ThinkingStart => {}
                     RunEvent::ThinkingDelta(delta) => {
+                        visible_output = true;
                         response_thinking.push_str(&delta);
                         if !self.context.compacting {
                             presentation.thinking_delta(&delta);
@@ -332,6 +342,7 @@ impl ConversationOutput {
                         name,
                         model_call_id,
                     } => {
+                        visible_output = true;
                         let call = ToolCall {
                             index,
                             call_id: call_id.clone(),
@@ -487,6 +498,7 @@ impl ConversationOutput {
                         streams.clear();
                     }
                     RunEvent::MessagesCommitted(state) => {
+                        turn_started |= state.cause == CommitCause::InitialMessages;
                         if matches!(&state.cause, CommitCause::RuntimeEvent { .. }) {
                             response_text.clear();
                             response_thinking.clear();
@@ -765,6 +777,13 @@ impl ConversationOutput {
                                 Ok(RunFinish::TurnCompleted)
                             }
                             RunOutcome::Cancelled => {
+                                if turn_started
+                                    && !visible_output
+                                    && self.context.withdrawable
+                                    && self.stopped_by_user.is_cancelled()
+                                {
+                                    self.withdraw_turn(&worker).await;
+                                }
                                 worker.abort();
                                 self.abort_execs().await;
                                 Ok(RunFinish::Transport(TransportFinish::Cancelled))
@@ -786,6 +805,44 @@ impl ConversationOutput {
     async fn abort_execs(&self) {
         for id in self.tool_runtime.drain_running().await {
             let _ = self.handle.emit(&codec::abort(id));
+        }
+    }
+
+    /// Cursor removes a turn the user stops before any visible output from
+    /// the chat and goes back to the state it sent with the run request. Its
+    /// agent host, which builds the next request, keeps the latest checkpoint
+    /// instead, and that checkpoint already holds the stopped message. Moving
+    /// the Conversation back and republishing the request state keeps the
+    /// next turn from being built on a message the user no longer sees.
+    async fn withdraw_turn(&self, worker: &CheckpointWorker) {
+        let run_id = self.run.run_id();
+        match self.store.withdraw_run(run_id).await {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                %run_id,
+                "Conversation moved on before the stopped turn was withdrawn"
+            ),
+            Err(error) => tracing::warn!(%run_id, %error, "failed to withdraw the stopped turn"),
+        }
+        let (ready, published) = oneshot::channel();
+        let job = CheckpointJob {
+            kind: CheckpointKind::Withdraw,
+            presentation: PendingSteps::default(),
+            context_tokens: None,
+            ready: Some(ready),
+        };
+        let published = match worker.jobs.send(job).await {
+            Ok(()) => published
+                .await
+                .unwrap_or_else(|_| Err("checkpoint worker stopped".into())),
+            Err(_) => Err("checkpoint worker closed".into()),
+        };
+        if let Err(error) = published {
+            tracing::warn!(
+                %run_id,
+                %error,
+                "failed to return Cursor to the state before the stopped turn"
+            );
         }
     }
 

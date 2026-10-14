@@ -423,6 +423,133 @@ async fn runtime_cancel_action_aborts_active_exec_before_canceled_end_stream() {
 }
 
 #[tokio::test]
+async fn user_stop_before_output_withdraws_the_turn() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(text_response("hello back"));
+    provider.push_pending();
+    let registry = transport_registry(&store, &provider);
+    let before = run_to_end(
+        &registry,
+        "withdraw-first",
+        user_run(
+            "withdraw-first",
+            "withdraw-conversation",
+            "withdraw-first-user",
+            None,
+        ),
+    )
+    .await;
+
+    let stopped = stop_turn(
+        &registry,
+        "withdraw-stopped",
+        user_run(
+            "withdraw-stopped",
+            "withdraw-conversation",
+            "withdraw-stopped-user",
+            Some(before.clone()),
+        ),
+        "user_stopped_generation",
+        StopWhen::TurnCheckpointed,
+    )
+    .await;
+
+    assert_eq!(
+        stopped.after_cancel,
+        [before],
+        "Cursor must return to the state it sent with the stopped message"
+    );
+    let messages = current_messages(&store, "withdraw-conversation").await;
+    assert!(holds_user_message(&messages, "withdraw-first-user"));
+    assert!(!holds_user_message(&messages, "withdraw-stopped-user"));
+}
+
+#[tokio::test]
+async fn user_stop_after_visible_output_keeps_the_turn() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(text_response("hello back"));
+    provider.push_then_pending(vec![
+        ModelEvent::Start {
+            model_call_id: "partial-call".into(),
+        },
+        ModelEvent::TextStart,
+        ModelEvent::TextDelta("partial".into()),
+    ]);
+    let registry = transport_registry(&store, &provider);
+    let before = run_to_end(
+        &registry,
+        "visible-first",
+        user_run(
+            "visible-first",
+            "visible-conversation",
+            "visible-first-user",
+            None,
+        ),
+    )
+    .await;
+
+    let stopped = stop_turn(
+        &registry,
+        "visible-stopped",
+        user_run(
+            "visible-stopped",
+            "visible-conversation",
+            "visible-stopped-user",
+            Some(before),
+        ),
+        "user_stopped_generation",
+        StopWhen::TextDelta,
+    )
+    .await;
+
+    assert!(stopped.after_cancel.is_empty());
+    assert_eq!(stopped.before_cancel.last().unwrap().turns.len(), 2);
+    let messages = current_messages(&store, "visible-conversation").await;
+    assert!(holds_user_message(&messages, "visible-stopped-user"));
+}
+
+#[tokio::test]
+async fn follow_up_cancel_before_output_keeps_the_turn() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(text_response("hello back"));
+    provider.push_pending();
+    let registry = transport_registry(&store, &provider);
+    let before = run_to_end(
+        &registry,
+        "follow-up-first",
+        user_run(
+            "follow-up-first",
+            "follow-up-conversation",
+            "follow-up-first-user",
+            None,
+        ),
+    )
+    .await;
+
+    let stopped = stop_turn(
+        &registry,
+        "follow-up-cancelled",
+        user_run(
+            "follow-up-cancelled",
+            "follow-up-conversation",
+            "follow-up-cancelled-user",
+            Some(before),
+        ),
+        "new_message_submitted",
+        StopWhen::TurnCheckpointed,
+    )
+    .await;
+
+    assert!(stopped.after_cancel.is_empty());
+    assert_eq!(stopped.before_cancel.last().unwrap().turns.len(), 2);
+    let messages = current_messages(&store, "follow-up-conversation").await;
+    assert!(holds_user_message(&messages, "follow-up-cancelled-user"));
+}
+
+#[tokio::test]
 async fn queued_user_message_after_turn_ended_starts_the_next_turn() {
     let (_directory, store) = fixtures::temp_store().await;
     let provider = fake_provider::FakeProvider::default();
@@ -1775,6 +1902,141 @@ fn subagent_success(id: u32) -> pb::AgentClientMessage {
     }
 }
 
+fn transport_registry(
+    store: &cursor_server::store::Store,
+    provider: &fake_provider::FakeProvider,
+) -> TransportRegistry {
+    let assets = PromptAssets::load(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("prompt/cursor")
+            .as_path(),
+    )
+    .unwrap();
+    TransportRegistry::new(
+        store.clone(),
+        Arc::new(provider.clone()),
+        PromptCompiler::new(assets),
+    )
+}
+
+fn user_run(
+    request_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+    state: Option<pb::ConversationStateStructure>,
+) -> pb::AgentClientMessage {
+    let mut message =
+        client_run_for_model_with_state(request_id, conversation_id, "test-model", state);
+    let Some(pb::agent_client_message::Message::RunRequest(request)) = message.message.as_mut()
+    else {
+        unreachable!()
+    };
+    let Some(pb::conversation_action::Action::UserMessageAction(action)) = request
+        .action
+        .as_mut()
+        .and_then(|action| action.action.as_mut())
+    else {
+        unreachable!()
+    };
+    action.user_message.as_mut().unwrap().message_id = message_id.into();
+    message
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopWhen {
+    /// Cursor has received a checkpoint that contains the new turn.
+    TurnCheckpointed,
+    /// Cursor has rendered the first answer text.
+    TextDelta,
+}
+
+struct StoppedTurn {
+    before_cancel: Vec<pb::ConversationStateStructure>,
+    after_cancel: Vec<pb::ConversationStateStructure>,
+}
+
+/// Starts a turn, sends a CancelAction with `reason` once `when` is reached,
+/// and collects the checkpoints Cursor receives before and after the cancel.
+async fn stop_turn(
+    registry: &TransportRegistry,
+    request_id: &str,
+    request: pb::AgentClientMessage,
+    reason: &str,
+    when: StopWhen,
+) -> StoppedTurn {
+    let handle = registry.get_or_create(request_id).await.unwrap();
+    let mut output = handle.subscribe();
+    handle
+        .command(TransportCommand::Append {
+            seqno: 0,
+            message: Box::new(request),
+        })
+        .await
+        .unwrap();
+    let mut append_seqno = 1;
+    let mut stopped = StoppedTurn {
+        before_cancel: Vec::new(),
+        after_cancel: Vec::new(),
+    };
+    let mut cancelled = false;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.recv())
+            .await
+            .unwrap()
+            .expect("RunSSE closed before EndStream");
+        let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
+        if flags & connect::END_STREAM_FLAG != 0 {
+            let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert!(cancelled, "Run ended before the cancel: {json}");
+            assert_eq!(json["error"]["code"], "canceled");
+            return stopped;
+        }
+        acknowledge_kv(&handle, &mut append_seqno, &frame).await;
+        let reached = match pb::AgentServerMessage::decode(payload).unwrap().message {
+            Some(pb::agent_server_message::Message::ConversationCheckpointUpdate(state)) => {
+                if cancelled {
+                    stopped.after_cancel.push(state);
+                } else {
+                    stopped.before_cancel.push(state);
+                }
+                when == StopWhen::TurnCheckpointed
+            }
+            Some(pb::agent_server_message::Message::InteractionUpdate(pb::InteractionUpdate {
+                message: Some(pb::interaction_update::Message::TextDelta(_)),
+            })) => when == StopWhen::TextDelta,
+            _ => false,
+        };
+        if reached && !cancelled {
+            cancelled = true;
+            handle
+                .command(TransportCommand::Append {
+                    seqno: append_seqno,
+                    message: Box::new(runtime_cancel(reason)),
+                })
+                .await
+                .unwrap();
+            append_seqno += 1;
+        }
+    }
+}
+
+async fn current_messages(
+    store: &cursor_server::store::Store,
+    conversation_id: &str,
+) -> Vec<CanonicalMessage> {
+    store
+        .load_current_messages(&ConversationId::new(conversation_id))
+        .await
+        .unwrap()
+}
+
+fn holds_user_message(messages: &[CanonicalMessage], message_id: &str) -> bool {
+    let prefix = format!("runtime:cursor:user:{message_id}:");
+    messages
+        .iter()
+        .any(|message| message.message_id.starts_with(&prefix))
+}
+
 async fn run_to_end(
     registry: &TransportRegistry,
     request_id: &str,
@@ -1896,11 +2158,18 @@ fn kv_ack(id: u32) -> pb::AgentClientMessage {
 }
 
 fn runtime_cancel_action() -> pb::AgentClientMessage {
+    runtime_cancel("")
+}
+
+fn runtime_cancel(reason: &str) -> pb::AgentClientMessage {
     pb::AgentClientMessage {
         message: Some(pb::agent_client_message::Message::ConversationAction(
             pb::ConversationAction {
                 action: Some(pb::conversation_action::Action::CancelAction(
-                    pb::CancelAction::default(),
+                    pb::CancelAction {
+                        reason: reason.into(),
+                        ..Default::default()
+                    },
                 )),
                 ..Default::default()
             },

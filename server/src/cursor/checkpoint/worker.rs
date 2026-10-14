@@ -35,6 +35,8 @@ pub(crate) enum CheckpointKind {
         summary: String,
         result: oneshot::Sender<Result<pb::ConversationStateStructure>>,
     },
+    /// Returns Cursor to the state it sent with the run request.
+    Withdraw,
 }
 
 pub(crate) struct FinalCheckpoints {
@@ -117,6 +119,7 @@ impl CheckpointWorker {
                         let _ = result.send(checkpoint);
                         Ok(())
                     }
+                    CheckpointKind::Withdraw => builder.publish(&handle, &builder.request).await,
                 };
 
                 if let Err(error) = result {
