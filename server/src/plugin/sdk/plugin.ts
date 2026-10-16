@@ -75,6 +75,7 @@ export function __descriptor(definition: ProviderPluginDefinition) {
       providerType: provider.providerType,
       resourceType: provider.resourceType ?? null,
       hasModels: provider.models !== undefined,
+      forwardsMessages: provider.forwardMessages !== undefined,
     })),
     resources: (definition.resources ?? []).map((resource) => ({
       type: resource.type,

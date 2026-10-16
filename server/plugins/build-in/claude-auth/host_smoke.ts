@@ -54,6 +54,7 @@ Deno.test("actual sandboxed worker completes OAuth, discovery, refresh, and stre
   let sequence = 0;
   let refreshes = 0;
   let streamClosed = false;
+  let opened: Packet = {};
   const send = (packet: Packet) =>
     input.write(new TextEncoder().encode(JSON.stringify(packet) + "\n"));
   const upstreamEvents = [
@@ -102,7 +103,8 @@ Deno.test("actual sandboxed worker completes OAuth, discovery, refresh, and stre
       equal(params.url, "https://api.anthropic.com/v1/messages");
       equal((params.headers as Packet).authorization, "Bearer rotated-access");
       equal(JSON.parse(params.body as string).model, "claude-test");
-      result = { streamId: "stream-1", status: 200, headers: {} };
+      opened = params;
+      result = { streamId: "stream-1", status: 200, headers: { "request-id": "req_1" } };
     } else if (packet.method === "network.stream.read") {
       equal(params.streamId, "stream-1");
       result = {
@@ -200,6 +202,35 @@ Deno.test("actual sandboxed worker completes OAuth, discovery, refresh, and stre
       resources: [{ ...account, ...patch }],
     });
     assert(streamClosed, "worker did not release its host stream");
+    // An external Messages request reaches the upstream as sent and comes back line by line.
+    const contextManagement = {
+      edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: 50000 } }],
+    };
+    const forwarded = await invoke("provider.forwardMessages", {
+      providerId: "claude",
+      resource: { ...account, ...patch },
+      model: models[0],
+      body: {
+        model: "plugin:dev.cursorbyok.examples.claude-auth:claude/claude-test",
+        max_tokens: 100,
+        stream: true,
+        context_management: contextManagement,
+        messages: [{ role: "user", content: "Hello" }],
+      },
+      headers: { "anthropic-beta": "compact-2026-01-12" },
+    });
+    equal((forwarded.result as Packet).status, "completed");
+    equal(JSON.parse(opened.body as string).context_management, contextManagement);
+    equal((opened.headers as Packet)["anthropic-beta"], "oauth-2025-04-20,compact-2026-01-12");
+    equal(forwarded.events[0], {
+      type: "response-start",
+      status: 200,
+      headers: { "request-id": "req_1" },
+    });
+    equal(
+      forwarded.events.slice(1).map((event) => (event as Packet).line),
+      upstreamEvents.flatMap((event) => [`data: ${JSON.stringify(event)}`, ""]),
+    );
   } finally {
     await input.close();
     const status = await child.status;

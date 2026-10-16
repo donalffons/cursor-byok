@@ -57,8 +57,9 @@ impl App {
             store.clone(),
             plugins.clone(),
             provider.clone(),
-            Some(api::byok::NativeForwarder::new(
+            Some(api::byok::Forwarder::new(
                 store.clone(),
+                plugins.clone(),
                 clients.clone(),
                 config.provider_request_timeout,
                 config.provider_stream_idle_timeout,

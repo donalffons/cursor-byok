@@ -1,8 +1,15 @@
-import type { JsonValue, PluginContext } from "cursor-byok:plugin";
+import type { JsonValue, NetworkEventStream, PluginContext } from "cursor-byok:plugin";
 import type { ModelSnapshot } from "cursor-byok:model";
-import type { LlmContentPart, LlmRequest, ModelUsage, ProviderOutput } from "cursor-byok:provider";
+import type {
+  ForwardOutput,
+  LlmContentPart,
+  LlmRequest,
+  ModelUsage,
+  ProviderOutput,
+} from "cursor-byok:provider";
 
 const REPLAY_KIND = "claude_oauth";
+const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 
 /** Anthropic accepts Opus subscription calls only when this identity leads the system prompt. */
 export const CLAUDE_CODE_SYSTEM_PROMPT =
@@ -276,6 +283,122 @@ function rejectionDetail(body: string): string | undefined {
   return /^[a-z_]+(\.[A-Za-z0-9_-]+)*: [^\n]{1,300}$/.test(message) ? message : undefined;
 }
 
+/** Reads a bounded error body and drains the host's lazy iterator, which would stay open. */
+async function errorBody(response: NetworkEventStream, signal: AbortSignal): Promise<string> {
+  const iterator = response.lines[Symbol.asyncIterator]();
+  let body = "";
+  try {
+    while (body.length <= ERROR_BODY_LIMIT) {
+      const item = await abortable(iterator.next(), signal);
+      if (item.done) break;
+      body += item.value;
+    }
+  } catch {
+    signal.throwIfAborted();
+  } finally {
+    try {
+      void iterator.return?.().catch(() => {});
+    } catch { /* Preserve HTTP status. */ }
+  }
+  return body;
+}
+
+function betas(value: string | undefined): string[] {
+  return (value ?? "").split(",").map((beta) => beta.trim()).filter(Boolean);
+}
+
+/**
+ * The client's request with the upstream model id and the identity block the subscription
+ * requires in front of the client's own system prompt. Everything else is the client's.
+ */
+export function forwardBody(model: ModelSnapshot, body: ObjectValue): ObjectValue {
+  const client = body.system;
+  const blocks: JsonValue[] = Array.isArray(client)
+    ? client
+    : typeof client === "string"
+    ? client ? [{ type: "text", text: client }] : []
+    : client === undefined || client === null
+    ? []
+    : [client];
+  const first = object(blocks[0]);
+  const system = first?.type === "text" && first.text === CLAUDE_CODE_SYSTEM_PROMPT
+    ? blocks
+    : [{ type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT }, ...blocks];
+  return { ...body, model: model.id, system };
+}
+
+/** Account headers, with the client's API version and its betas added to the account's. */
+export function forwardHeaders(
+  account: Record<string, string>,
+  client: Record<string, string>,
+  stream: boolean,
+): Record<string, string> {
+  return {
+    ...account,
+    accept: stream ? "text/event-stream" : "application/json",
+    "content-type": "application/json",
+    "anthropic-version": client["anthropic-version"] || account["anthropic-version"],
+    "anthropic-beta": [
+      ...new Set([...betas(account["anthropic-beta"]), ...betas(client["anthropic-beta"])]),
+    ].join(","),
+  };
+}
+
+/**
+ * Sends a client's Messages request and relays the upstream response unchanged, errors
+ * included. A 401 is withheld so the caller can refresh the token and retry once.
+ */
+export async function forwardMessages(
+  model: ModelSnapshot,
+  body: ObjectValue,
+  clientHeaders: Record<string, string>,
+  accountHeaders: Record<string, string>,
+  output: ForwardOutput,
+  context: PluginContext,
+): Promise<void> {
+  context.signal.throwIfAborted();
+  const response = await abortable(
+    context.network.stream(MESSAGES_URL, {
+      method: "POST",
+      headers: forwardHeaders(accountHeaders, clientHeaders, body.stream === true),
+      body: JSON.stringify(forwardBody(model, body)),
+    }),
+    context.signal,
+  );
+  context.signal.throwIfAborted();
+  if (response.status === 401) {
+    const text = await errorBody(response, context.signal);
+    throw new HttpError(401, response.headers, undefined, rejectionDetail(text));
+  }
+  output.emit({ type: "response-start", status: response.status, headers: response.headers });
+  const iterator = response.lines[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      const item = await abortable(iterator.next(), context.signal);
+      if (item.done) break;
+      output.emit({ type: "response-line", line: item.value });
+    }
+  } finally {
+    try {
+      void iterator.return?.().catch(() => {});
+    } catch { /* Preserve the relay outcome. */ }
+  }
+  // The client already has the upstream error. Only a rate limit describes the shared account;
+  // any other rejection (400, 403, 404, ...) can come from this client's own request content.
+  if (response.status === 429) throw new HttpError(429, response.headers);
+  if (response.status < 200 || response.status >= 300) {
+    throw new RelayedRejection(response.status);
+  }
+}
+
+/** An upstream rejection already relayed to the external client; the account stays as it is. */
+export class RelayedRejection extends Error {
+  constructor(readonly status: number) {
+    super(`Anthropic Messages ${status}`);
+    this.name = "RelayedRejection";
+  }
+}
+
 export async function streamMessages(
   model: ModelSnapshot,
   request: LlmRequest,
@@ -285,7 +408,7 @@ export async function streamMessages(
 ): Promise<void> {
   context.signal.throwIfAborted();
   const response = await abortable(
-    context.network.stream("https://api.anthropic.com/v1/messages", {
+    context.network.stream(MESSAGES_URL, {
       method: "POST",
       headers: {
         ...headers,
@@ -299,22 +422,7 @@ export async function streamMessages(
   );
   context.signal.throwIfAborted();
   if (response.status < 200 || response.status >= 300) {
-    // Drain the host's lazy iterator, otherwise its stream handle stays open.
-    const iterator = response.lines[Symbol.asyncIterator]();
-    let body = "";
-    try {
-      while (body.length <= ERROR_BODY_LIMIT) {
-        const item = await abortable(iterator.next(), context.signal);
-        if (item.done) break;
-        body += item.value;
-      }
-    } catch {
-      context.signal.throwIfAborted();
-    } finally {
-      try {
-        void iterator.return?.().catch(() => {});
-      } catch { /* Preserve HTTP status. */ }
-    }
+    const body = await errorBody(response, context.signal);
     throw new HttpError(response.status, response.headers, undefined, rejectionDetail(body));
   }
   const blocks: ObjectValue[] = [];

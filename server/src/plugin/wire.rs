@@ -10,6 +10,8 @@ use crate::{
     Error, Result,
 };
 
+use super::registry::ForwardItem;
+
 /// 把一次核心模型调用投影成 SDK 的 LlmRequest。
 pub fn llm_request(invocation: &ModelInvocation) -> Result<serde_json::Value> {
     let request = &invocation.request;
@@ -177,6 +179,36 @@ pub fn model_event(value: &serde_json::Value) -> Result<ModelEvent> {
     Ok(event)
 }
 
+/// Parses a relay event from `forwardMessages` into a verbatim response item.
+pub fn forward_item(value: &serde_json::Value) -> Result<ForwardItem> {
+    match value.get("type").and_then(serde_json::Value::as_str) {
+        Some("response-start") => Ok(ForwardItem::Start {
+            status: value
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok())
+                .ok_or_else(|| Error::Protocol("response-start requires an HTTP status".into()))?,
+            headers: value
+                .get("headers")
+                .and_then(serde_json::Value::as_object)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value.as_str().map(|value| (name.clone(), value.to_owned()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        Some("response-line") => Ok(ForwardItem::Line(required_str(value, "line")?.to_owned())),
+        kind => Err(Error::Protocol(format!(
+            "unknown plugin forward event: {}",
+            kind.unwrap_or("<missing>")
+        ))),
+    }
+}
+
 fn required_str<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -266,6 +298,28 @@ mod tests {
         assert_eq!(messages[1]["toolCalls"][0]["callId"], "c1");
         assert_eq!(messages[2]["role"], "tool");
         assert_eq!(messages[2]["isError"], false);
+    }
+
+    #[test]
+    fn parses_relay_events_into_forward_items() {
+        assert_eq!(
+            forward_item(&serde_json::json!({
+                "type": "response-start",
+                "status": 429,
+                "headers": {"retry-after": "30"}
+            }))
+            .unwrap(),
+            ForwardItem::Start {
+                status: 429,
+                headers: vec![("retry-after".into(), "30".into())],
+            }
+        );
+        assert_eq!(
+            forward_item(&serde_json::json!({"type": "response-line", "line": ""})).unwrap(),
+            ForwardItem::Line(String::new())
+        );
+        assert!(forward_item(&serde_json::json!({"type": "response-start"})).is_err());
+        assert!(forward_item(&serde_json::json!({"type": "text-delta", "text": "x"})).is_err());
     }
 
     #[test]

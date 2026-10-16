@@ -19,7 +19,10 @@ pub use descriptor::{
     parse_model_id, PluginDescriptor, PluginModelDescriptor, PluginProviderDescriptor,
     PluginResourceDescriptor, PluginResourceView, ADAPTER_ID_PREFIX,
 };
-pub use registry::{ImportResponse, OAuthBeginResponse, OAuthPollResponse, PluginRegistry};
+pub use registry::{
+    ForwardItem, ImportResponse, OAuthBeginResponse, OAuthPollResponse, PluginInvocationPlan,
+    PluginRegistry,
+};
 pub use runtime::{PluginRuntime, PluginRuntimePhase, PluginRuntimeState, PluginRuntimeStatus};
 
 /// Windows 下阻止 Deno 子进程弹出控制台窗口(CREATE_NO_WINDOW)。

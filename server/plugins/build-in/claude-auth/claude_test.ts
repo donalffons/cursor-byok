@@ -5,7 +5,7 @@ import type {
   NetworkResponse,
   PluginContext,
 } from "cursor-byok:plugin";
-import type { LlmRequest, ModelEvent } from "cursor-byok:provider";
+import type { ForwardEvent, LlmRequest, ModelEvent } from "cursor-byok:provider";
 import type { ResourceSnapshot } from "cursor-byok:resource";
 import {
   accountData,
@@ -16,6 +16,7 @@ import {
   RESOURCE_TYPE,
   TOKEN_URL,
 } from "./auth.ts";
+import { CLAUDE_CODE_SYSTEM_PROMPT, forwardBody, forwardHeaders } from "./messages.ts";
 import { claudeOAuth } from "./oauth.ts";
 import { claudeAccounts } from "./resources.ts";
 import { claudeModels } from "./models.ts";
@@ -632,4 +633,134 @@ Deno.test("cancelled invocation makes no network calls", async () => {
   );
   equal(result.status, "request-error");
   assert(!result.patch);
+});
+
+function forwardInput(selected: ResourceSnapshot, body: Record<string, JsonValue> = {}) {
+  return {
+    model,
+    resource: selected,
+    body: {
+      model: "plugin:dev.cursorbyok.examples.claude-auth:claude/claude-test",
+      max_tokens: 100,
+      stream: true,
+      system: [{ type: "text", text: "Be terse.", cache_control: { type: "ephemeral" } }],
+      context_management: {
+        edits: [{ type: "compact_20260112", trigger: { type: "input_tokens", value: 50000 } }],
+      },
+      messages: [
+        { role: "user", content: "Hi" },
+        { role: "assistant", content: [{ type: "compaction", content: "Summary." }] },
+        { role: "user", content: "Continue" },
+      ],
+      ...body,
+    },
+    headers: { "anthropic-version": "2023-06-01", "anthropic-beta": "compact-2026-01-12" },
+  };
+}
+
+Deno.test("Messages forwarding keeps the client's request and relays every upstream line", async () => {
+  const relayed: ForwardEvent[] = [];
+  const selected = resource();
+  let sent: Record<string, JsonValue> = {};
+  const upstream = ["event: message_start", 'data: {"type":"message_start"}', ""];
+  const result = await claudeProvider.forwardMessages!(
+    forwardInput(selected),
+    { emit: (event) => relayed.push(event) },
+    context({
+      stream: (url, init) => {
+        equal(url, "https://api.anthropic.com/v1/messages");
+        equal(init?.headers?.authorization, `Bearer ${accountData(selected).accessToken}`);
+        equal(init?.headers?.["anthropic-beta"], "oauth-2025-04-20,compact-2026-01-12");
+        equal(init?.headers?.accept, "text/event-stream");
+        sent = JSON.parse(init?.body ?? "{}");
+        return { status: 200, headers: { "request-id": "req_1" }, lines: lines(upstream) };
+      },
+    }),
+  );
+  equal(result.status, "completed");
+  equal(sent.model, "claude-test");
+  equal(sent.system, [
+    { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT },
+    { type: "text", text: "Be terse.", cache_control: { type: "ephemeral" } },
+  ]);
+  const original = forwardInput(selected).body;
+  equal(sent.context_management, original.context_management);
+  equal(sent.messages, original.messages);
+  equal(relayed, [
+    { type: "response-start", status: 200, headers: { "request-id": "req_1" } },
+    ...upstream.map((line) => ({ type: "response-line", line })),
+  ]);
+});
+
+Deno.test("Messages forwarding adds the identity block once to text or absent system prompts", () => {
+  const identity = { type: "text", text: CLAUDE_CODE_SYSTEM_PROMPT };
+  equal(forwardBody(model, { system: "Be terse." }).system, [
+    identity,
+    { type: "text", text: "Be terse." },
+  ]);
+  equal(forwardBody(model, {}).system, [identity]);
+  equal(forwardBody(model, { system: [identity] }).system, [identity]);
+  equal(
+    forwardHeaders({ "anthropic-version": "2023-06-01", "anthropic-beta": "oauth-2025-04-20" }, {
+      "anthropic-beta": "oauth-2025-04-20, context-management-2025-06-27",
+    }, false),
+    {
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20,context-management-2025-06-27",
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+  );
+});
+
+Deno.test("Messages forwarding withholds a 401, refreshes once, and relays the retry", async () => {
+  const relayed: ForwardEvent[] = [];
+  let requests = 0;
+  const result = await claudeProvider.forwardMessages!(
+    forwardInput(resource()),
+    { emit: (event) => relayed.push(event) },
+    context({
+      fetch: () => response(tokens()),
+      stream: (_url, init) => {
+        requests++;
+        if (requests === 1) return stream(401);
+        equal(init?.headers?.authorization, "Bearer new-access-secret");
+        return { status: 200, headers: {}, lines: lines(["data: {}", ""]) };
+      },
+    }),
+  );
+  equal(requests, 2);
+  equal(result.status, "completed");
+  assert(result.patch?.privateData);
+  equal(relayed.map((event) => event.type), ["response-start", "response-line", "response-line"]);
+});
+
+Deno.test("Messages forwarding relays a rate limit to the client and cools the account", async () => {
+  const relayed: ForwardEvent[] = [];
+  const error = '{"type":"error","error":{"type":"rate_limit_error","message":"Slow down"}}';
+  const result = await claudeProvider.forwardMessages!(
+    forwardInput(resource()),
+    { emit: (event) => relayed.push(event) },
+    context({
+      stream: () => ({ status: 429, headers: { "retry-after": "30" }, lines: lines([error]) }),
+    }),
+  );
+  equal(relayed, [
+    { type: "response-start", status: 429, headers: { "retry-after": "30" } },
+    { type: "response-line", line: error },
+  ]);
+  equal(result.status, "resource-error");
+  assert(result.status === "resource-error" && result.patch.state?.status === "cooling");
+});
+
+Deno.test("Messages forwarding relays a rejection of the client's request without touching the account", async () => {
+  const relayed: ForwardEvent[] = [];
+  const error = '{"type":"error","error":{"type":"permission_error","message":"Beta not allowed"}}';
+  const result = await claudeProvider.forwardMessages!(
+    forwardInput(resource()),
+    { emit: (event) => relayed.push(event) },
+    context({ stream: () => ({ status: 403, headers: {}, lines: lines([error]) }) }),
+  );
+  equal(relayed.at(-1), { type: "response-line", line: error });
+  equal(result, { status: "request-error", message: "Anthropic Messages 403" });
 });

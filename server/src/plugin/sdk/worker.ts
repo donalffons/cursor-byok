@@ -1,5 +1,5 @@
 import { __getRegisteredPlugin, type JsonValue, type NetworkEventStream, type PluginContext } from "cursor-byok:plugin";
-import type { ModelEvent, ProviderSupport } from "cursor-byok:provider";
+import type { ForwardEvent, ModelEvent, ProviderSupport } from "cursor-byok:provider";
 import type { ResourceAddMethod, ResourceSupport } from "cursor-byok:resource";
 
 if (Deno.args.length !== 1) throw new Error("plugin entry URL is required");
@@ -104,6 +104,23 @@ async function dispatch(message: { id: string; method: string; params?: JsonValu
         );
         break;
       }
+      case "provider.forwardMessages": {
+        const support = provider(params.providerId);
+        if (!support.forwardMessages) {
+          throw new Error(`plugin provider ${params.providerId} cannot forward Messages`);
+        }
+        result = await support.forwardMessages(
+          {
+            model: params.model as never,
+            resource: (params.resource ?? null) as never,
+            body: params.body as never,
+            headers: params.headers as never,
+          },
+          { emit: (event: ForwardEvent) => void send({ type: "event", id: message.id, event }) },
+          context,
+        );
+        break;
+      }
       case "models.list": {
         const models = provider(params.providerId).models;
         if (!models) throw new Error(`plugin provider ${params.providerId} has no models`);
@@ -183,30 +200,36 @@ async function dispatch(message: { id: string; method: string; params?: JsonValu
   }
 }
 
-let buffered = "";
+function receive(line: string): void {
+  if (!line.trim()) return;
+  const message = JSON.parse(line);
+  if (message.type === "request") {
+    void dispatch(message);
+  } else if (message.type === "cancel") {
+    controllers.get(message.id)?.abort();
+  } else if (message.type === "host_result" || message.type === "host_error") {
+    const pending = pendingHost.get(message.id);
+    if (!pending) return;
+    pendingHost.delete(message.id);
+    if (message.type === "host_result") pending.resolve(message.result);
+    else pending.reject(new Error(message.error));
+  }
+}
+
+// Each chunk is scanned once: a multi-megabyte request must not stall the other calls.
+let partial: string[] = [];
 for await (const chunk of Deno.stdin.readable.pipeThrough(new TextDecoderStream())) {
-  buffered += chunk;
+  let start = 0;
   for (;;) {
-    const newline = buffered.indexOf("\n");
-    if (newline < 0) break;
-    const line = buffered.slice(0, newline);
-    buffered = buffered.slice(newline + 1);
-    if (!line.trim()) continue;
-    const message = JSON.parse(line);
-    if (message.type === "request") {
-      void dispatch(message);
-    } else if (message.type === "cancel") {
-      controllers.get(message.id)?.abort();
-    } else if (message.type === "host_result") {
-      const pending = pendingHost.get(message.id);
-      if (!pending) continue;
-      pendingHost.delete(message.id);
-      pending.resolve(message.result);
-    } else if (message.type === "host_error") {
-      const pending = pendingHost.get(message.id);
-      if (!pending) continue;
-      pendingHost.delete(message.id);
-      pending.reject(new Error(message.error));
+    const newline = chunk.indexOf("\n", start);
+    if (newline < 0) {
+      if (start < chunk.length) partial.push(chunk.slice(start));
+      break;
     }
+    partial.push(chunk.slice(start, newline));
+    const line = partial.join("");
+    partial = [];
+    start = newline + 1;
+    receive(line);
   }
 }

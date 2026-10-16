@@ -4,7 +4,8 @@ use serde_json::Value;
 use crate::{
     model::{
         ContentPart, ModelRequest, ModelSpec, ProjectedContent, ProjectedMessage, PromptSpec,
-        ProviderType, Role, ToolCallContent, ToolDefinition, ToolResultContent,
+        ProviderReplayState, ProviderType, Role, ToolCallContent, ToolDefinition,
+        ToolResultContent,
     },
     Error, Result,
 };
@@ -120,6 +121,41 @@ fn text_content(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn tool_result(
+    call_id: &str,
+    name: String,
+    content: Option<&Value>,
+    is_error: bool,
+) -> Result<ToolResultContent> {
+    let (content, provider_parts) = match content {
+        Some(Value::Array(_)) => {
+            let parts = parse_parts(content)?;
+            let text = parts
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            // Providers send the parts instead of the text only when an image needs them.
+            let images = parts
+                .iter()
+                .any(|part| matches!(part, ContentPart::Image { .. }));
+            (text, if images { parts } else { Vec::new() })
+        }
+        content => (text_content(content).unwrap_or_default(), Vec::new()),
+    };
+    Ok(ToolResultContent {
+        call_id: call_id.into(),
+        name,
+        content,
+        is_error,
+        image: None,
+        provider_parts,
+    })
+}
+
 fn parse_parts(value: Option<&Value>) -> Result<Vec<ContentPart>> {
     let value = value.ok_or_else(|| Error::Protocol("message content is required".into()))?;
     if let Some(text) = value.as_str() {
@@ -131,6 +167,9 @@ fn parse_parts(value: Option<&Value>) -> Result<Vec<ContentPart>> {
     array
         .iter()
         .map(|part| {
+            if let Some(text) = part.as_str() {
+                return Ok(ContentPart::Text { text: text.into() });
+            }
             let kind = part.get("type").and_then(Value::as_str).unwrap_or("text");
             match kind {
                 "text" | "input_text" | "output_text" => Ok(ContentPart::Text {
@@ -240,31 +279,25 @@ fn parse_chat_messages(
                     },
                 });
             }
-            "tool" => history.push(ProjectedMessage {
-                message_id: format!("external:{index}"),
-                role: Role::Tool,
-                content: ProjectedContent::ToolResult(ToolResultContent {
-                    call_id: required_string(message, "tool_call_id")?.into(),
-                    name: message
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                        .or_else(|| {
-                            tool_name(
-                                history,
-                                message
-                                    .get("tool_call_id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default(),
-                            )
-                        })
-                        .unwrap_or_else(|| "tool".into()),
-                    content: text_content(message.get("content")).unwrap_or_default(),
-                    is_error: false,
-                    image: None,
-                    provider_parts: Vec::new(),
-                }),
-            }),
+            "tool" => {
+                let call_id = required_string(message, "tool_call_id")?;
+                let name = message
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| tool_name(history, call_id))
+                    .unwrap_or_else(|| "tool".into());
+                history.push(ProjectedMessage {
+                    message_id: format!("external:{index}"),
+                    role: Role::Tool,
+                    content: ProjectedContent::ToolResult(tool_result(
+                        call_id,
+                        name,
+                        message.get("content"),
+                        false,
+                    )?),
+                });
+            }
             _ => return Err(Error::Protocol(format!("unsupported role: {role}"))),
         }
     }
@@ -277,19 +310,20 @@ fn parse_responses_input(value: &Value, history: &mut Vec<ProjectedMessage>) -> 
         .ok_or_else(|| Error::Protocol("input must be text or an array".into()))?;
     for (index, item) in items.iter().enumerate() {
         match item.get("type").and_then(Value::as_str) {
-            Some("function_call_output") => history.push(ProjectedMessage {
-                message_id: format!("external:{index}"),
-                role: Role::Tool,
-                content: ProjectedContent::ToolResult(ToolResultContent {
-                    call_id: required_string(item, "call_id")?.into(),
-                    name: tool_name(history, required_string(item, "call_id")?)
-                        .unwrap_or_else(|| "tool".into()),
-                    content: text_content(item.get("output")).unwrap_or_default(),
-                    is_error: false,
-                    image: None,
-                    provider_parts: Vec::new(),
-                }),
-            }),
+            Some("function_call_output") => {
+                let call_id = required_string(item, "call_id")?;
+                let name = tool_name(history, call_id).unwrap_or_else(|| "tool".into());
+                history.push(ProjectedMessage {
+                    message_id: format!("external:{index}"),
+                    role: Role::Tool,
+                    content: ProjectedContent::ToolResult(tool_result(
+                        call_id,
+                        name,
+                        item.get("output"),
+                        false,
+                    )?),
+                });
+            }
             Some("function_call") => history.push(ProjectedMessage {
                 message_id: format!("external:{index}"),
                 role: Role::Assistant,
@@ -338,8 +372,12 @@ fn parse_anthropic_messages(
         if let Some(blocks) = content.as_array() {
             let mut text_parts = Vec::new();
             let mut calls = Vec::new();
+            let mut thinking_blocks = Vec::new();
             for (block_index, block) in blocks.iter().enumerate() {
                 match block.get("type").and_then(Value::as_str) {
+                    Some("thinking" | "redacted_thinking") if role == "assistant" => {
+                        thinking_blocks.push(block.clone());
+                    }
                     Some("tool_use") => calls.push(ToolCallContent {
                         index: calls.len(),
                         call_id: required_string(block, "id")?.into(),
@@ -363,20 +401,20 @@ fn parse_anthropic_messages(
                             });
                         }
                         let call_id = required_string(block, "tool_use_id")?;
+                        let name = tool_name(history, call_id).unwrap_or_else(|| "tool".into());
+                        let is_error = block
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         history.push(ProjectedMessage {
                             message_id: format!("external:{index}:{block_index}:tool"),
                             role: Role::Tool,
-                            content: ProjectedContent::ToolResult(ToolResultContent {
-                                call_id: call_id.into(),
-                                name: tool_name(history, call_id).unwrap_or_else(|| "tool".into()),
-                                content: text_content(block.get("content")).unwrap_or_default(),
-                                is_error: block
-                                    .get("is_error")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(false),
-                                image: None,
-                                provider_parts: Vec::new(),
-                            }),
+                            content: ProjectedContent::ToolResult(tool_result(
+                                call_id,
+                                name,
+                                block.get("content"),
+                                is_error,
+                            )?),
                         });
                     }
                     _ => text_parts.extend(parse_parts(Some(&Value::Array(vec![block.clone()])))?),
@@ -394,13 +432,23 @@ fn parse_anthropic_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("");
+                // Signed thinking replays to Anthropic upstreams; others read only the text.
+                let thinking = thinking_blocks
+                    .iter()
+                    .filter_map(|block| block.get("thinking").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let replay_state = (!thinking_blocks.is_empty()).then(|| ProviderReplayState {
+                    provider_kind: "anthropic".into(),
+                    value: serde_json::json!({ "blocks": thinking_blocks }),
+                });
                 history.push(ProjectedMessage {
                     message_id: format!("external:{index}"),
                     role: Role::Assistant,
                     content: ProjectedContent::Assistant {
                         text,
-                        thinking: String::new(),
-                        replay_state: None,
+                        thinking,
+                        replay_state,
                         calls,
                     },
                 });

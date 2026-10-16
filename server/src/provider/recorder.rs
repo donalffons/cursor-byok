@@ -139,15 +139,25 @@ impl CallRecorder {
         }
     }
 
+    /// Records the request with inline media replaced by its size and hash; the stored byte
+    /// count stays the size that was sent.
     pub async fn request(
         &self,
         headers: serde_json::Value,
         body: &serde_json::Value,
     ) -> Result<()> {
+        let request_bytes = serde_json::to_vec(body)?.len();
+        let body = without_inline_media(body);
         let attempt = self.inner.attempt.lock().await;
         self.inner
             .store
-            .record_llm_request(&attempt.call_id, &headers, body, self.inner.detailed)
+            .record_llm_request(
+                &attempt.call_id,
+                &headers,
+                &body,
+                request_bytes,
+                self.inner.detailed,
+            )
             .await?;
         Ok(())
     }
@@ -355,6 +365,58 @@ fn elapsed_ms(started: Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
 
+/// Replaces base64 media with its length and hash, only where providers carry media:
+/// Anthropic `{"type":"base64","data"}` sources, Gemini `inlineData.data`, and `data:` URLs in
+/// OpenAI `image_url` / `image_url.url` / `file_data`. Text and tool arguments stay as sent.
+fn without_inline_media(value: &serde_json::Value) -> serde_json::Value {
+    redact_media(value, None)
+}
+
+fn redact_media(value: &serde_json::Value, key: Option<&str>) -> serde_json::Value {
+    use serde_json::Value;
+    fn summary(encoded: &str) -> String {
+        use sha2::Digest;
+        let hash = hex::encode(sha2::Sha256::digest(encoded.as_bytes()));
+        format!("[{} base64 chars, sha256 {}]", encoded.len(), &hash[..16])
+    }
+    fn data_url(text: &str) -> Value {
+        match text
+            .strip_prefix("data:")
+            .and_then(|rest| rest.split_once(";base64,"))
+        {
+            Some((mime, data)) => Value::String(format!("data:{mime};base64,{}", summary(data))),
+            None => Value::String(text.to_owned()),
+        }
+    }
+    match value {
+        Value::Object(object) => {
+            let source = object.get("type").and_then(Value::as_str) == Some("base64")
+                || matches!(key, Some("inlineData" | "inline_data"));
+            let image_url = key == Some("image_url");
+            Value::Object(
+                object
+                    .iter()
+                    .map(|(name, field)| {
+                        let field = match field {
+                            Value::String(data) if source && name == "data" => {
+                                Value::String(summary(data))
+                            }
+                            Value::String(url) if image_url && name == "url" => data_url(url),
+                            field => redact_media(field, Some(name)),
+                        };
+                        (name.clone(), field)
+                    })
+                    .collect(),
+            )
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| redact_media(item, None)).collect())
+        }
+        Value::String(text) if matches!(key, Some("image_url" | "file_data")) => data_url(text),
+        value => value.clone(),
+    }
+}
+
 fn finish_reason(reason: FinishReason) -> &'static str {
     match reason {
         FinishReason::Stop => "stop",
@@ -379,6 +441,51 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn recorded_requests_keep_media_size_and_hash_instead_of_base64() {
+        let data = "QUJD".repeat(1000);
+        let url = format!("data:image/png;base64,{data}");
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": url},
+                {"type": "tool_result", "tool_use_id": "t", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+                ]},
+                {"type": "tool_use", "id": "u", "name": "save", "input": {"data": data, "mime_type": "text/plain"}},
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "input_image", "image_url": url},
+                {"type": "input_file", "file_data": url},
+                {"inlineData": {"mimeType": "image/png", "data": data}}
+            ]}]
+        });
+        let recorded = without_inline_media(&body);
+        let content = &recorded["messages"][0]["content"];
+        let summary = "[4000 base64 chars, sha256 ";
+        assert_eq!(content[0]["text"], url, "text stays as sent");
+        assert!(content[1]["content"][0]["source"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with(summary));
+        assert_eq!(
+            content[2]["input"]["data"], data,
+            "tool arguments stay as sent"
+        );
+        for media in [
+            &content[3]["image_url"]["url"],
+            &content[4]["image_url"],
+            &content[5]["file_data"],
+        ] {
+            assert!(media
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("data:image/png;base64,{summary}")));
+        }
+        assert!(content[6]["inlineData"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with(summary));
+    }
 
     #[tokio::test]
     async fn dropping_an_unfinished_call_guard_marks_the_call_cancelled() {

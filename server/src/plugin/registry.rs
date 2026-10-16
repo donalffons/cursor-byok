@@ -1,8 +1,9 @@
 //! Orchestrates plugin capabilities: resources, model catalogs, and invocation.
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, pin::Pin, sync::Arc, time::Duration};
 
 use async_stream::try_stream;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use futures_util::Stream;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock};
@@ -137,6 +138,46 @@ pub struct PluginInvocationPlan {
     pub request_url: String,
 }
 
+/// One item of a verbatim upstream response relayed by a plugin.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ForwardItem {
+    Start {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
+    Line(String),
+}
+
+/// The provider, model, and selected resource that one plugin model call runs against.
+struct CallTarget {
+    plugin_id: String,
+    worker: Arc<PluginWorker>,
+    provider: ProviderDefinition,
+    model: StoredModel,
+    resource: Option<(String, ResourceRecord)>,
+}
+
+impl CallTarget {
+    async fn invoke(
+        &self,
+        method: &str,
+        mut params: serde_json::Value,
+        cancellation: CancellationToken,
+        recorder: CallRecorder,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerStreamItem>> {
+        params["providerId"] = self.provider.id.clone().into();
+        params["model"] = self.model.snapshot();
+        params["resource"] = self
+            .resource
+            .as_ref()
+            .map(|(resource_type, record)| record.snapshot(resource_type))
+            .unwrap_or_default();
+        self.worker
+            .invoke_streaming(method, params, cancellation, Some(recorder))
+            .await
+    }
+}
+
 impl PluginRegistry {
     pub fn managed(store: Store, runtime: PluginRuntime, app_version: String) -> Result<Self> {
         let data = PluginDataStore::managed()?;
@@ -261,70 +302,133 @@ impl PluginRegistry {
     ) -> ProviderStream {
         let registry = self.clone();
         Box::pin(try_stream! {
-            let model_id = invocation.request.model.model_id.clone();
-            let (plugin_id, provider_id, upstream_id) = parse_model_id(&model_id)
-                .map(|(plugin, provider, model)| (plugin.to_owned(), provider.to_owned(), model.to_owned()))
-                .ok_or_else(|| Error::Provider(format!("invalid plugin model ID: {model_id}")))?;
-            let executable = registry.executable()?;
-            let entry = registry.find_entry(&executable, &plugin_id).await?;
-            let provider = find_provider(&entry, &provider_id)?.clone();
-            let stored = registry.inner.state.models(&plugin_id, &provider_id).await?
-                .into_iter()
-                .find(|model| model.id == upstream_id)
-                .ok_or_else(|| Error::RunNotFound(format!("plugin model {model_id}")))?;
-            let resource = match &provider.resource_type {
-                Some(resource_type) => Some((
-                    resource_type.clone(),
-                    registry.select_resource(&plugin_id, resource_type).await?,
-                )),
-                None => None,
-            };
+            let target = registry.call_target(&invocation.request.model.model_id).await?;
             let request = wire::llm_request(&invocation)?;
-            let params = serde_json::json!({
-                "providerId": provider_id,
-                "model": stored.snapshot(),
-                "resource": resource.as_ref().map(|(resource_type, record)| record.snapshot(resource_type)),
-                "request": request,
-            });
-            let worker = registry.worker(&entry, &executable).await;
-            let mut items = worker.invoke_streaming("provider.invoke", params, cancellation.clone(), Some(recorder)).await?;
+            let mut items = target.invoke(
+                "provider.invoke",
+                serde_json::json!({ "request": request }),
+                cancellation,
+                recorder,
+            ).await?;
             yield ModelEvent::Start { model_call_id: invocation.call_id.clone() };
             while let Some(item) = items.recv().await {
                 match item {
-                    WorkerStreamItem::Event(event) => {
-                        yield wire::model_event(&event)?;
-                    }
+                    WorkerStreamItem::Event(event) => yield wire::model_event(&event)?,
                     WorkerStreamItem::Result(result) => {
-                        let value = result?;
-                        let status = value.get("status").and_then(serde_json::Value::as_str).unwrap_or_default();
-                        let patch = value.get("patch")
-                            .filter(|patch| !patch.is_null())
-                            .map(|patch| serde_json::from_value::<ResourcePatch>(patch.clone()))
-                            .transpose()?;
-                        if let (Some(patch), Some((resource_type, record))) = (patch, resource.as_ref()) {
-                            if let Err(error) = registry.inner.state
-                                .apply_patch(&plugin_id, resource_type, &record.id, patch).await
-                            {
-                                tracing::warn!(plugin = %plugin_id, %error, "failed to apply plugin resource patch");
-                            }
-                        }
-                        match status {
-                            "completed" => return,
-                            "resource-error" | "request-error" => {
-                                let message = value.get("message")
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or("plugin provider call failed");
-                                Err(Error::Provider(message.to_owned()))?;
-                            }
-                            status => {
-                                Err(Error::Protocol(format!("unknown plugin provider result: {status}")))?;
-                            }
-                        }
+                        registry.finish_call(&target, result).await?;
+                        return;
                     }
                 }
             }
-            Err(Error::Provider(format!("plugin '{plugin_id}' worker stopped mid-stream")))?;
+            Err(Error::Provider(format!("plugin '{}' worker stopped mid-stream", target.plugin_id)))?;
         })
+    }
+
+    /// Relays a client's Anthropic Messages request verbatim through a plugin provider that
+    /// declares `forwardMessages`. Yields the upstream status and headers, then its body lines.
+    /// A failure reported after the start still ends the stream with an error.
+    pub fn forward_messages(
+        &self,
+        model_id: String,
+        body: serde_json::Value,
+        headers: serde_json::Value,
+        cancellation: CancellationToken,
+        recorder: CallRecorder,
+    ) -> Pin<Box<dyn Stream<Item = Result<ForwardItem>> + Send>> {
+        let registry = self.clone();
+        Box::pin(try_stream! {
+            let target = registry.call_target(&model_id).await?;
+            if !target.provider.forwards_messages {
+                Err(Error::Provider(format!("plugin model {model_id} cannot forward Messages requests")))?;
+            }
+            let mut items = target.invoke(
+                "provider.forwardMessages",
+                serde_json::json!({ "body": body, "headers": headers }),
+                cancellation,
+                recorder,
+            ).await?;
+            while let Some(item) = items.recv().await {
+                match item {
+                    WorkerStreamItem::Event(event) => yield wire::forward_item(&event)?,
+                    WorkerStreamItem::Result(result) => {
+                        registry.finish_call(&target, result).await?;
+                        return;
+                    }
+                }
+            }
+            Err(Error::Provider(format!("plugin '{}' worker stopped mid-stream", target.plugin_id)))?;
+        })
+    }
+
+    async fn call_target(&self, model_id: &str) -> Result<CallTarget> {
+        let (plugin_id, provider_id, upstream_id) = parse_model_id(model_id)
+            .ok_or_else(|| Error::Provider(format!("invalid plugin model ID: {model_id}")))?;
+        let executable = self.executable()?;
+        let entry = self.find_entry(&executable, plugin_id).await?;
+        let provider = find_provider(&entry, provider_id)?.clone();
+        let model = self
+            .inner
+            .state
+            .models(plugin_id, provider_id)
+            .await?
+            .into_iter()
+            .find(|model| model.id == upstream_id)
+            .ok_or_else(|| Error::RunNotFound(format!("plugin model {model_id}")))?;
+        let resource = match &provider.resource_type {
+            Some(resource_type) => Some((
+                resource_type.clone(),
+                self.select_resource(plugin_id, resource_type).await?,
+            )),
+            None => None,
+        };
+        Ok(CallTarget {
+            plugin_id: plugin_id.to_owned(),
+            worker: self.worker(&entry, &executable).await,
+            provider,
+            model,
+            resource,
+        })
+    }
+
+    /// Persists the plugin's resource patch, then maps its result status to the call outcome.
+    async fn finish_call(
+        &self,
+        target: &CallTarget,
+        result: Result<serde_json::Value>,
+    ) -> Result<()> {
+        let value = result?;
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let patch = value
+            .get("patch")
+            .filter(|patch| !patch.is_null())
+            .map(|patch| serde_json::from_value::<ResourcePatch>(patch.clone()))
+            .transpose()?;
+        if let (Some(patch), Some((resource_type, record))) = (patch, target.resource.as_ref()) {
+            if let Err(error) = self
+                .inner
+                .state
+                .apply_patch(&target.plugin_id, resource_type, &record.id, patch)
+                .await
+            {
+                tracing::warn!(plugin = %target.plugin_id, %error, "failed to apply plugin resource patch");
+            }
+        }
+        match status {
+            "completed" => Ok(()),
+            "resource-error" | "request-error" => Err(Error::Provider(
+                value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("plugin provider call failed")
+                    .to_owned(),
+            )),
+            status => Err(Error::Protocol(format!(
+                "unknown plugin provider result: {status}"
+            ))),
+        }
     }
 
     pub async fn oauth_begin(

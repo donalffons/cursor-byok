@@ -109,6 +109,30 @@ export type ProviderInvokeInput = {
 };
 
 /**
+ * A client's Anthropic Messages request, relayed verbatim. `headers` holds only the client's
+ * `anthropic-version` and `anthropic-beta` headers, lower-cased.
+ */
+export type MessagesForwardInput = {
+  model: ModelSnapshot;
+  resource: ResourceSnapshot | null;
+  body: { [key: string]: JsonValue };
+  headers: Record<string, string>;
+};
+
+/**
+ * The upstream HTTP response, relayed to the client unchanged: one `response-start`, then every
+ * body line without its line terminator. Emit nothing before the attempt whose response the
+ * client should receive.
+ */
+export type ForwardEvent =
+  | { type: "response-start"; status: number; headers: Record<string, string> }
+  | { type: "response-line"; line: string };
+
+export type ForwardOutput = {
+  emit(event: ForwardEvent): void;
+};
+
+/**
  * `resource-error` 把失败归因到选中的资源,宿主据此更新资源状态,
  * 并可在尚未发出任何事件时(未来)换一个资源重试。`patch` 同时用于
  * 持久化成功调用的副作用,例如刷新后的 access token。
@@ -130,6 +154,16 @@ export type ProviderSupport = {
   invoke(
     input: ProviderInvokeInput,
     output: ProviderOutput,
+    context: PluginContext,
+  ): Promise<ProviderResult>;
+  /**
+   * Relays an Anthropic Messages request from the external API without projecting it, so
+   * every Messages feature reaches the upstream. Only the credentials and the parts the
+   * upstream requires may change. The host records usage from the relayed lines.
+   */
+  forwardMessages?(
+    input: MessagesForwardInput,
+    output: ForwardOutput,
     context: PluginContext,
   ): Promise<ProviderResult>;
 };

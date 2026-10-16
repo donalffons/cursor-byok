@@ -26,6 +26,8 @@ pub struct ProviderDefinition {
     #[serde(default)]
     pub resource_type: Option<String>,
     pub has_models: bool,
+    /// The provider relays external Anthropic Messages requests verbatim.
+    pub forwards_messages: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,6 +139,8 @@ pub struct PluginModelDescriptor {
     pub max_output_tokens: Option<u64>,
     pub images: bool,
     pub enabled: bool,
+    /// External Anthropic Messages requests reach this model verbatim.
+    pub forwards_messages: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -294,6 +298,7 @@ impl PluginModelDescriptor {
             max_output_tokens: model.max_output_tokens,
             images: model.images,
             enabled: model.enabled,
+            forwards_messages: provider.forwards_messages,
         }
     }
 }

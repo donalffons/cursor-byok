@@ -103,6 +103,7 @@ impl Store {
         call_id: &str,
         headers: &serde_json::Value,
         body: &serde_json::Value,
+        request_bytes: usize,
         detailed: bool,
     ) -> Result<()> {
         let body_json = serde_json::to_string(body)?;
@@ -116,13 +117,13 @@ impl Store {
                 .bind(call_id)
                 .bind(headers_json)
                 .bind(&body_json)
-                .bind(body_json.len() as i64)
+                .bind(request_bytes as i64)
                 .bind(call_id)
                 .execute(&mut *transaction)
                 .await?;
         }
         sqlx::query("UPDATE llm_calls SET request_bytes = ? WHERE call_id = ?")
-            .bind(body_json.len() as i64)
+            .bind(request_bytes as i64)
             .bind(call_id)
             .execute(&mut *transaction)
             .await?;

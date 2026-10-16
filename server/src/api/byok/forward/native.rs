@@ -1,6 +1,4 @@
-//! Forwards matching HTTP protocols without projecting provider messages.
-use std::time::Duration;
-
+//! Forwards matching HTTP protocols to configured models.
 use async_stream::try_stream;
 use axum::{
     body::Body,
@@ -8,45 +6,19 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use serde_json::Value;
-use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    model::{ModelConfig, NewLlmCall, Usage},
-    network::NetworkClients,
-    provider::{custom_headers, CallRecorder, FinishReason},
-    store::Store,
+    model::{ModelConfig, NewLlmCall},
+    provider::{custom_headers, CallRecorder, CancelOnDrop, FinishReason},
     Error, Result,
 };
 
-use super::protocol::Protocol;
+use super::{build_response, header_pairs, observe_events, Forwarder, Protocol, Summary};
 
-#[derive(Clone)]
-pub struct NativeForwarder {
-    store: Store,
-    clients: NetworkClients,
-    request_timeout: Duration,
-    stream_idle_timeout: Duration,
-}
-
-impl NativeForwarder {
-    pub fn new(
-        store: Store,
-        clients: NetworkClients,
-        request_timeout: Duration,
-        stream_idle_timeout: Duration,
-    ) -> Self {
-        Self {
-            store,
-            clients,
-            request_timeout,
-            stream_idle_timeout,
-        }
-    }
-
-    pub(super) async fn forward(
+impl Forwarder {
+    pub(in crate::api::byok) async fn native(
         &self,
         protocol: Protocol,
         incoming_headers: &HeaderMap,
@@ -141,6 +113,8 @@ impl NativeForwarder {
             .collect::<serde_json::Map<_, _>>();
         let client = self.clients.provider_client(self.request_timeout).await?;
         let recorder = CallRecorder::start(self.store.clone(), new_call).await?;
+        // A client that leaves before the response starts must not leave the call running.
+        let cancel_record = recorder.cancel_on_drop();
         recorder
             .request(Value::Object(logged_headers), &body)
             .await?;
@@ -163,7 +137,14 @@ impl NativeForwarder {
         let headers = response.headers().clone();
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
         if stream && status.is_success() {
-            Ok(self.stream_response(protocol, response, recorder, status, &headers))
+            Ok(self.stream_response(
+                protocol,
+                response,
+                recorder,
+                cancel_record,
+                status,
+                &headers,
+            ))
         } else {
             let bytes = match response.bytes().await {
                 Ok(bytes) => bytes,
@@ -176,7 +157,7 @@ impl NativeForwarder {
             recorder.response_chunk(&bytes).await?;
             if status.is_success() {
                 if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                    let summary = NativeSummary::from_value(protocol, &value);
+                    let summary = Summary::from_value(protocol, &value);
                     if let Some(usage) = summary.usage {
                         recorder.usage(usage).await?;
                     }
@@ -195,7 +176,11 @@ impl NativeForwarder {
                     .failed(&Error::Provider(format!("upstream returned {status}")))
                     .await?;
             }
-            Ok(build_response(status, &headers, Body::from(bytes)))
+            Ok(build_response(
+                status,
+                header_pairs(&headers),
+                Body::from(bytes),
+            ))
         }
     }
 
@@ -204,12 +189,13 @@ impl NativeForwarder {
         protocol: Protocol,
         response: reqwest::Response,
         recorder: CallRecorder,
+        cancel_record: CancelOnDrop,
         status: StatusCode,
         headers: &HeaderMap,
     ) -> Response {
         let idle_timeout = self.stream_idle_timeout;
         let output = try_stream! {
-            let _cancel = recorder.cancel_on_drop();
+            let _cancel = cancel_record;
             let (sender, receiver) = tokio::sync::mpsc::channel::<Bytes>(8);
             let observer = tokio::spawn(observe_events(protocol, receiver));
             let mut upstream = response.bytes_stream();
@@ -246,134 +232,6 @@ impl NativeForwarder {
             }
         };
         let output = output.map(|result: Result<Bytes>| result);
-        build_response(status, headers, Body::from_stream(output))
+        build_response(status, header_pairs(headers), Body::from_stream(output))
     }
-}
-
-fn build_response(status: StatusCode, headers: &HeaderMap, body: Body) -> Response {
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
-    for (name, value) in headers {
-        if !matches!(
-            name.as_str(),
-            "content-length" | "content-encoding" | "transfer-encoding" | "connection"
-        ) {
-            response.headers_mut().append(name, value.clone());
-        }
-    }
-    response
-}
-
-#[derive(Default)]
-struct NativeSummary {
-    usage: Option<Usage>,
-    finish: Option<FinishReason>,
-    failure: Option<String>,
-}
-
-impl NativeSummary {
-    fn from_value(protocol: Protocol, value: &Value) -> Self {
-        let mut summary = Self::default();
-        summary.observe(protocol, value);
-        summary
-    }
-
-    fn observe(&mut self, protocol: Protocol, value: &Value) {
-        if matches!(
-            value.get("type").and_then(Value::as_str),
-            Some("error" | "response.failed")
-        ) || value.get("error").is_some_and(|error| !error.is_null())
-        {
-            self.failure = Some(
-                value
-                    .pointer("/error/message")
-                    .or_else(|| value.pointer("/response/error/message"))
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream error event")
-                    .to_owned(),
-            );
-        }
-        let usage = match protocol {
-            Protocol::Chat => value.get("usage"),
-            Protocol::Responses => value
-                .pointer("/response/usage")
-                .or_else(|| value.get("usage")),
-            Protocol::Messages => value
-                .pointer("/message/usage")
-                .or_else(|| value.get("usage")),
-        }
-        .filter(|usage| !usage.is_null())
-        .map(|usage| crate::provider::native_usage(protocol.provider_type(), usage));
-        if let Some(usage) = usage {
-            let current = self.usage.get_or_insert_default();
-            for (target, incoming) in [
-                (&mut current.input_tokens, usage.input_tokens),
-                (
-                    &mut current.context_input_tokens,
-                    usage.context_input_tokens,
-                ),
-                (&mut current.output_tokens, usage.output_tokens),
-                (&mut current.total_tokens, usage.total_tokens),
-                (&mut current.cache_read_tokens, usage.cache_read_tokens),
-                (&mut current.cache_write_tokens, usage.cache_write_tokens),
-                (&mut current.reasoning_tokens, usage.reasoning_tokens),
-            ] {
-                if incoming.is_some() {
-                    *target = incoming;
-                }
-            }
-        }
-        let reason = match protocol {
-            Protocol::Chat => value
-                .pointer("/choices/0/finish_reason")
-                .and_then(Value::as_str),
-            Protocol::Responses => value
-                .pointer("/response/incomplete_details/reason")
-                .and_then(Value::as_str),
-            Protocol::Messages => value
-                .pointer("/delta/stop_reason")
-                .or_else(|| value.get("stop_reason"))
-                .and_then(Value::as_str),
-        };
-        self.finish = match reason {
-            Some("tool_calls" | "tool_use") => Some(FinishReason::ToolUse),
-            Some("length" | "max_tokens" | "max_output_tokens") => Some(FinishReason::Length),
-            Some(_) => Some(FinishReason::Stop),
-            None => self.finish,
-        };
-        if matches!(protocol, Protocol::Responses)
-            && (value.pointer("/item/type").and_then(Value::as_str) == Some("function_call")
-                || value
-                    .pointer("/response/output")
-                    .and_then(Value::as_array)
-                    .is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item.get("type").and_then(Value::as_str) == Some("function_call")
-                        })
-                    }))
-        {
-            self.finish = Some(FinishReason::ToolUse);
-        }
-    }
-}
-
-async fn observe_events(
-    protocol: Protocol,
-    receiver: tokio::sync::mpsc::Receiver<Bytes>,
-) -> NativeSummary {
-    let source = ReceiverStream::new(receiver)
-        .map(Ok::<_, Error>)
-        .eventsource();
-    futures_util::pin_mut!(source);
-    let mut summary = NativeSummary::default();
-    while let Some(event) = source.next().await {
-        let Ok(event) = event else {
-            break;
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
-            summary.observe(protocol, &value);
-        }
-    }
-    summary
 }

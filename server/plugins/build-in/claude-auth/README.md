@@ -19,8 +19,8 @@ server/
 │   ├── resources.ts              Safe account presentation and usage/credential refresh
 │   ├── usage.ts                  Subscription usage lookup, quota metrics, and limit cooling
 │   ├── models.ts                 Paginated API model discovery and capability metadata
-│   ├── provider.ts               Invocation, credential patches, and error/limit classification
-│   ├── messages.ts               Messages serialization, streaming, and signed-thinking replay
+│   ├── provider.ts               Invocation, Messages forwarding, credential patches, limit cooling
+│   ├── messages.ts               Messages serialization, streaming, verbatim forwarding, replay
 │   ├── assets/plugin.svg         Neutral plugin icon, not Anthropic branding
 │   ├── claude_test.ts            Mocked OAuth, resource, discovery, and provider tests
 │   ├── messages_test.ts          Mocked Messages protocol and history-prefix tests
@@ -57,6 +57,16 @@ Model invocation
   → text / thinking / tool events → host → Cursor
   → terminal result includes rotated credentials, even on handled inference errors
   → host applies the credential/state patch
+
+External Messages request (`POST /byok/v1/messages`, `forwardMessages`)
+  → host passes the client's body and its `anthropic-version` / `anthropic-beta` headers
+  → plugin replaces only the model id, adds the Claude Code identity block before the client's
+    system prompt, and adds the OAuth beta to the client's betas
+  → /v1/messages with the client's body: context management, compaction blocks, thinking,
+    cache control, and future fields reach Anthropic unchanged
+  → upstream status, headers, and body lines → host → client, errors included
+  → HTTP 401 is withheld for one refresh/retry; 403 and 429 still update the account state
+  → host records usage and outcome from the relayed lines
 
 Usage refresh (host loop every 60 s, or the account's Refresh button)
   → plugin rotates credentials only if they expire soon, or once after a usage 401

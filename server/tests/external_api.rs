@@ -645,10 +645,11 @@ async fn all_entry_and_upstream_protocol_pairs_preserve_cache_usage() {
     );
     let outer = byok::router(
         store.clone(),
-        plugins,
+        plugins.clone(),
         Arc::new(provider),
-        Some(byok::NativeForwarder::new(
+        Some(byok::Forwarder::new(
             store.clone(),
+            plugins.clone(),
             NetworkClients::new(store.clone()),
             Duration::from_secs(10),
             Duration::from_secs(10),
@@ -837,8 +838,9 @@ async fn matching_http_protocols_forward_native_requests_and_responses() {
                     store.clone(),
                     plugins.clone(),
                     Arc::new(fake_provider::FakeProvider::default()),
-                    Some(byok::NativeForwarder::new(
+                    Some(byok::Forwarder::new(
                         store.clone(),
+                        plugins.clone(),
                         NetworkClients::new(store.clone()),
                         Duration::from_secs(10),
                         Duration::from_secs(10),
@@ -876,10 +878,11 @@ async fn matching_http_protocols_forward_native_requests_and_responses() {
     let (status, body) = send(
         byok::router(
             store.clone(),
-            plugins,
+            plugins.clone(),
             Arc::new(fake_provider::FakeProvider::default()),
-            Some(byok::NativeForwarder::new(
+            Some(byok::Forwarder::new(
                 store.clone(),
+                plugins.clone(),
                 NetworkClients::new(store.clone()),
                 Duration::from_secs(10),
                 Duration::from_secs(10),
@@ -900,4 +903,227 @@ async fn matching_http_protocols_forward_native_requests_and_responses() {
     assert_eq!(receiver.recv().await.unwrap().1, error_request);
     server.abort();
     drop(directory);
+}
+
+async fn enabled_setup() -> (
+    axum::Router,
+    fake_provider::FakeProvider,
+    cursor_server::store::Store,
+    tempfile::TempDir,
+) {
+    let (router, provider, store, directory) = setup().await;
+    store
+        .set_external_api_settings(ExternalApiSettings {
+            enabled: true,
+            api_key: "secret".into(),
+        })
+        .await
+        .unwrap();
+    (router, provider, store, directory)
+}
+
+fn finished_text() -> Vec<ModelEvent> {
+    vec![
+        ModelEvent::TextDelta("done".into()),
+        ModelEvent::Done(FinishReason::Stop),
+    ]
+}
+
+/// A 1×1 PNG.
+const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+#[tokio::test]
+async fn requests_up_to_32_mb_are_accepted_and_larger_ones_get_a_protocol_shaped_413() {
+    let (router, provider, _store, _directory) = enabled_setup().await;
+    provider.push(finished_text());
+    let image = |size: usize| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"A".repeat(size)}});
+    let request = |size: usize| {
+        json!({"model":"work/qwen/model","max_tokens":10,
+            "messages":[{"role":"user","content":[{"type":"text","text":"look"}, image(size)]}]})
+    };
+    let (status, _) = send(
+        router.clone(),
+        "POST",
+        "/byok/v1/messages",
+        Some("secret"),
+        request(10 * 1024 * 1024),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/byok/v1/messages",
+        Some("secret"),
+        request(33 * 1024 * 1024),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "request_too_large");
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/byok/v1/chat/completions",
+        Some("secret"),
+        json!({"model":"work/qwen/model","messages":[{"role":"user","content":"A".repeat(33 * 1024 * 1024)}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert_eq!(provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn messages_errors_use_the_anthropic_error_shape() {
+    let (router, _provider, _store, _directory) = enabled_setup().await;
+    let request =
+        json!({"model":"missing","max_tokens":10,"messages":[{"role":"user","content":"hi"}]});
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/byok/v1/messages",
+        Some("secret"),
+        request.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({"type":"error","error":{"type":"not_found_error","message":"model not found"}})
+    );
+    let (status, body) = send(router, "POST", "/byok/v1/messages", Some("wrong"), request).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["error"]["type"],
+        "authentication_error"
+    );
+}
+
+#[tokio::test]
+async fn tool_result_images_reach_the_model_in_every_protocol() {
+    let (router, provider, _store, _directory) = enabled_setup().await;
+    let data_url = format!("data:image/png;base64,{PNG}");
+    let requests = [
+        (
+            "/byok/v1/messages",
+            json!({"model":"work/qwen/model","max_tokens":10,"messages":[
+                {"role":"user","content":"look"},
+                {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"view_image","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[
+                    {"type":"text","text":"1 image"},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG}}
+                ]}]}
+            ]}),
+        ),
+        (
+            "/byok/v1/chat/completions",
+            json!({"model":"work/qwen/model","messages":[
+                {"role":"user","content":"look"},
+                {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"view_image","arguments":"{}"}}]},
+                {"role":"tool","tool_call_id":"call_1","content":[
+                    {"type":"text","text":"1 image"},
+                    {"type":"image_url","image_url":{"url":data_url}}
+                ]}
+            ]}),
+        ),
+        (
+            "/byok/v1/responses",
+            json!({"model":"work/qwen/model","input":[
+                {"role":"user","content":"look"},
+                {"type":"function_call","call_id":"call_1","name":"view_image","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_1","output":[
+                    {"type":"input_text","text":"1 image"},
+                    {"type":"input_image","image_url":data_url}
+                ]}
+            ]}),
+        ),
+    ];
+    for (path, body) in requests {
+        provider.push(finished_text());
+        let (status, response) = send(router.clone(), "POST", path, Some("secret"), body).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {response}");
+        let request = provider.requests().pop().unwrap();
+        let ProjectedContent::ToolResult(result) = &request.history[2].content else {
+            panic!("{path}: expected a tool result");
+        };
+        assert_eq!(result.name, "view_image", "{path}");
+        assert_eq!(result.content, "1 image", "{path}");
+        assert!(
+            matches!(
+                result.provider_parts.as_slice(),
+                [
+                    cursor_server::model::ContentPart::Text { .. },
+                    cursor_server::model::ContentPart::Image { mime_type, data },
+                ] if mime_type == "image/png" && data.starts_with(b"\x89PNG")
+            ),
+            "{path}: image part was dropped"
+        );
+    }
+}
+
+#[tokio::test]
+async fn messages_history_keeps_signed_thinking_for_replay() {
+    let (router, provider, _store, _directory) = enabled_setup().await;
+    provider.push(finished_text());
+    let thinking = json!({"type":"thinking","thinking":"Check the file.","signature":"sig-1"});
+    let redacted = json!({"type":"redacted_thinking","data":"opaque"});
+    let (status, body) = send(
+        router,
+        "POST",
+        "/byok/v1/messages",
+        Some("secret"),
+        json!({"model":"work/qwen/model","max_tokens":10,"messages":[
+            {"role":"user","content":"read it"},
+            {"role":"assistant","content":[thinking, redacted,
+                {"type":"tool_use","id":"call_1","name":"read","input":{}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"text"}]}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = provider.requests().pop().unwrap();
+    let ProjectedContent::Assistant {
+        thinking: text,
+        replay_state,
+        calls,
+        ..
+    } = &request.history[1].content
+    else {
+        panic!("expected an assistant message");
+    };
+    assert_eq!(text, "Check the file.");
+    assert_eq!(calls.len(), 1);
+    let replay = replay_state.as_ref().expect("signed thinking replay state");
+    assert_eq!(replay.provider_kind, "anthropic");
+    assert_eq!(replay.value, json!({"blocks":[thinking, redacted]}));
+}
+
+#[tokio::test]
+async fn tool_result_arrays_read_plain_strings_as_text() {
+    let (router, provider, _store, _directory) = enabled_setup().await;
+    provider.push(finished_text());
+    let (status, body) = send(
+        router,
+        "POST",
+        "/byok/v1/chat/completions",
+        Some("secret"),
+        json!({"model":"work/qwen/model","messages":[
+            {"role":"user","content":"look"},
+            {"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"call_1","content":["plain",{"type":"text","text":"more"}]}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = provider.requests().pop().unwrap();
+    let ProjectedContent::ToolResult(result) = &request.history[2].content else {
+        panic!("expected a tool result");
+    };
+    assert_eq!(result.content, "plain\nmore");
+    assert!(result.provider_parts.is_empty());
 }
