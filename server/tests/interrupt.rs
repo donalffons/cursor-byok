@@ -452,6 +452,7 @@ async fn user_stop_before_output_withdraws_the_turn() {
         ),
         "user_stopped_generation",
         StopWhen::TurnCheckpointed,
+        &[],
     )
     .await;
 
@@ -463,6 +464,68 @@ async fn user_stop_before_output_withdraws_the_turn() {
     let messages = current_messages(&store, "withdraw-conversation").await;
     assert!(holds_user_message(&messages, "withdraw-first-user"));
     assert!(!holds_user_message(&messages, "withdraw-stopped-user"));
+}
+
+#[tokio::test]
+async fn user_stop_while_the_run_is_prepared_withdraws_the_turn() {
+    let (_directory, store) = fixtures::temp_store().await;
+    let provider = fake_provider::FakeProvider::default();
+    provider.push(text_response("hello back"));
+    provider.push_pending();
+    let registry = transport_registry(&store, &provider);
+    let before = run_to_end(
+        &registry,
+        "preparing-first",
+        user_run(
+            "preparing-first",
+            "preparing-conversation",
+            "preparing-first-user",
+            None,
+        ),
+    )
+    .await;
+    // Only Cursor holds this blob now, so preparing the next run waits for
+    // Cursor to send it; the stop arrives during that wait.
+    let blob_id = before.root_prompt_messages_json.last().unwrap().clone();
+    let blob_data: Vec<u8> = sqlx::query_scalar("SELECT data FROM blobs WHERE blob_id = ?")
+        .bind(&blob_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM blobs WHERE blob_id = ?")
+        .bind(&blob_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let stopped = stop_turn(
+        &registry,
+        "preparing-stopped",
+        user_run(
+            "preparing-stopped",
+            "preparing-conversation",
+            "preparing-stopped-user",
+            Some(before.clone()),
+        ),
+        "user_stopped_generation",
+        StopWhen::Preparing,
+        &[(blob_id, blob_data)],
+    )
+    .await;
+
+    assert_eq!(
+        stopped.after_cancel.last(),
+        Some(&before),
+        "Cursor must return to the state it sent with the stopped message"
+    );
+    assert_eq!(
+        provider.requests().len(),
+        1,
+        "a run stopped during preparation must not call the model"
+    );
+    let messages = current_messages(&store, "preparing-conversation").await;
+    assert!(holds_user_message(&messages, "preparing-first-user"));
+    assert!(!holds_user_message(&messages, "preparing-stopped-user"));
 }
 
 #[tokio::test]
@@ -501,6 +564,7 @@ async fn user_stop_after_visible_output_keeps_the_turn() {
         ),
         "user_stopped_generation",
         StopWhen::TextDelta,
+        &[],
     )
     .await;
 
@@ -540,6 +604,7 @@ async fn follow_up_cancel_before_output_keeps_the_turn() {
         ),
         "new_message_submitted",
         StopWhen::TurnCheckpointed,
+        &[],
     )
     .await;
 
@@ -1944,6 +2009,8 @@ fn user_run(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StopWhen {
+    /// The server is still preparing the run and reads a blob from Cursor.
+    Preparing,
     /// Cursor has received a checkpoint that contains the new turn.
     TurnCheckpointed,
     /// Cursor has rendered the first answer text.
@@ -1957,12 +2024,14 @@ struct StoppedTurn {
 
 /// Starts a turn, sends a CancelAction with `reason` once `when` is reached,
 /// and collects the checkpoints Cursor receives before and after the cancel.
+/// Blob reads the server asks Cursor for are answered from `client_blobs`.
 async fn stop_turn(
     registry: &TransportRegistry,
     request_id: &str,
     request: pb::AgentClientMessage,
     reason: &str,
     when: StopWhen,
+    client_blobs: &[(Vec<u8>, Vec<u8>)],
 ) -> StoppedTurn {
     let handle = registry.get_or_create(request_id).await.unwrap();
     let mut output = handle.subscribe();
@@ -1991,8 +2060,49 @@ async fn stop_turn(
             assert_eq!(json["error"]["code"], "canceled");
             return stopped;
         }
-        acknowledge_kv(&handle, &mut append_seqno, &frame).await;
         let reached = match pb::AgentServerMessage::decode(payload).unwrap().message {
+            Some(pb::agent_server_message::Message::KvServerMessage(pb::KvServerMessage {
+                id,
+                message: Some(pb::kv_server_message::Message::GetBlobArgs(args)),
+                ..
+            })) => {
+                if when == StopWhen::Preparing && !cancelled {
+                    cancelled = true;
+                    handle
+                        .command(TransportCommand::Append {
+                            seqno: append_seqno,
+                            message: Box::new(runtime_cancel(reason)),
+                        })
+                        .await
+                        .unwrap();
+                    append_seqno += 1;
+                }
+                let blob_data = client_blobs
+                    .iter()
+                    .find(|(blob_id, _)| *blob_id == args.blob_id)
+                    .map(|(_, data)| data.clone());
+                handle
+                    .command(TransportCommand::Append {
+                        seqno: append_seqno,
+                        message: Box::new(pb::AgentClientMessage {
+                            message: Some(pb::agent_client_message::Message::KvClientMessage(
+                                pb::KvClientMessage {
+                                    id,
+                                    message: Some(pb::kv_client_message::Message::GetBlobResult(
+                                        pb::GetBlobResult {
+                                            blob_data,
+                                            error: None,
+                                        },
+                                    )),
+                                },
+                            )),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+                append_seqno += 1;
+                continue;
+            }
             Some(pb::agent_server_message::Message::ConversationCheckpointUpdate(state)) => {
                 if cancelled {
                     stopped.after_cancel.push(state);
@@ -2006,6 +2116,7 @@ async fn stop_turn(
             })) => when == StopWhen::TextDelta,
             _ => false,
         };
+        acknowledge_kv(&handle, &mut append_seqno, &frame).await;
         if reached && !cancelled {
             cancelled = true;
             handle

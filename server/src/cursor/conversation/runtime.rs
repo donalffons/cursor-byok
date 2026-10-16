@@ -40,6 +40,8 @@ struct RunGeneration {
     id: u64,
     request: pb::AgentRunRequest,
     superseded: CancellationToken,
+    /// Set by any CancelAction, even one that arrives before the run exists.
+    cancelled: CancellationToken,
     stopped_by_user: CancellationToken,
     finished: CancellationToken,
     run: Arc<parking_lot::Mutex<Option<RunHandle>>>,
@@ -448,6 +450,7 @@ impl ConversationRuntime {
                                                 if action.reason == USER_STOP_REASON {
                                                     generation.stopped_by_user.cancel();
                                                 }
+                                                generation.cancelled.cancel();
                                                 if let Some(run) = generation.run.lock().clone() {
                                                     run.cancel();
                                                 }
@@ -559,6 +562,7 @@ async fn start_generation(
         id: *next_generation,
         request: request.clone(),
         superseded: CancellationToken::new(),
+        cancelled: CancellationToken::new(),
         stopped_by_user: CancellationToken::new(),
         finished: CancellationToken::new(),
         run: Arc::new(parking_lot::Mutex::new(None)),
@@ -779,6 +783,12 @@ fn spawn_run_request(
             run_handle.cancel();
             *generation.run.lock() = None;
             return;
+        }
+        // A CancelAction that arrived while the run was being prepared found
+        // no run to cancel. Applying it now ends the run before any model
+        // call, through the same path as a cancel during the run.
+        if generation.cancelled.is_cancelled() {
+            run_handle.cancel();
         }
         registry
             .activate(conversation_id.clone(), run_id.clone(), run_handle.clone())
