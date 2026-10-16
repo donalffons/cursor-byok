@@ -1,13 +1,20 @@
 //! Implements Cursor account information services.
 use axum::{
     body::{to_bytes, Body},
-    extract::Extension,
+    extract::{Extension, State},
     http::{header, HeaderValue, Request, Response},
 };
-use prost::Message;
+use bytes::{Bytes, BytesMut};
+use prost::{encoding, Message};
 use serde_json::Value;
 
-use crate::{api::cursor::proxy, local_app, Result};
+use crate::{
+    api::cursor::{is_local_model, proxy},
+    cursor::{protocol::proto::agent::v1 as agent, transport::TransportRegistry},
+    local_app,
+    store::Store,
+    Result,
+};
 
 use super::entitlement::FreeEntitlementCache;
 
@@ -145,6 +152,15 @@ struct UsageLimitPolicyStatus {
     allowed_model_tags: Vec<String>,
 }
 
+/// `GetUsageLimitStatusAndActiveGrantsResponse.model_recommendation_nudge`.
+const MODEL_RECOMMENDATION_NUDGE_FIELD: u32 = 4;
+
+#[derive(Clone, PartialEq, Message)]
+struct ModelRecommendationNudge {
+    #[prost(message, optional, tag = "4")]
+    source_model: Option<agent::RequestedModel>,
+}
+
 #[derive(Clone, Copy, PartialEq, Message)]
 struct Empty {}
 
@@ -255,12 +271,16 @@ pub async fn current_period_usage(
 }
 
 pub async fn usage_limit_status(
+    State(registry): State<TransportRegistry>,
     Extension(upstream): Extension<proxy::CursorProxy>,
     Extension(free_entitlements): Extension<FreeEntitlementCache>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
-    local_or_confirmed_free_or_forward(upstream, &free_entitlements, request, || {
-        proto(GetUsageLimitStatusAndActiveGrantsResponse {
+    if local_app::request_uses_local_cursor_token(request.headers())
+        || free_entitlements.is_confirmed_free(request.headers())
+    {
+        consume_body(request).await?;
+        return proto(GetUsageLimitStatusAndActiveGrantsResponse {
             usage_limit_policy_status: Some(UsageLimitPolicyStatus {
                 is_in_slow_pool: false,
                 features: Default::default(),
@@ -269,9 +289,63 @@ pub async fn usage_limit_status(
                 allowed_model_ids: Vec::new(),
                 allowed_model_tags: Vec::new(),
             }),
-        })
-    })
-    .await
+        });
+    }
+    let response = proxy::forward_buffered(&upstream, request).await?;
+    if !response.status.is_success() {
+        return Ok(response.into_response());
+    }
+    let body = without_byok_model_nudge(registry.store(), &response.body).await?;
+    Ok(response.with_body(body))
+}
+
+/// Removes Cursor's mid-conversation model nudge when it would switch a BYOK
+/// conversation to another model.
+///
+/// After every successful foreground turn Cursor asks this endpoint for a
+/// recommendation and applies a returned nudge silently, to the conversation
+/// and to the global model selection ("Switched to Auto"). Cursor skips the
+/// nudge only for its own API-key BYOK, so BYOK models here are switched to
+/// Auto, whose smaller context window then forces Cursor to summarize the
+/// conversation. Every other response field passes through byte for byte.
+async fn without_byok_model_nudge(store: &Store, body: &Bytes) -> Result<Bytes> {
+    let mut kept = BytesMut::with_capacity(body.len());
+    let mut rest = &body[..];
+    while !rest.is_empty() {
+        let field = rest;
+        let (tag, wire_type) = encoding::decode_key(&mut rest)?;
+        let nudge = if tag == MODEL_RECOMMENDATION_NUDGE_FIELD
+            && wire_type == encoding::WireType::LengthDelimited
+        {
+            let length = encoding::decode_varint(&mut rest)? as usize;
+            if length > rest.len() {
+                return Err(crate::Error::Protocol(
+                    "truncated model recommendation nudge".into(),
+                ));
+            }
+            let (nudge, after) = rest.split_at(length);
+            rest = after;
+            Some(ModelRecommendationNudge::decode(nudge)?)
+        } else {
+            encoding::skip_field(wire_type, tag, &mut rest, Default::default())?;
+            None
+        };
+        let source_model = nudge
+            .as_ref()
+            .and_then(|nudge| nudge.source_model.as_ref())
+            .map(|model| model.model_id.as_str());
+        if let Some(model_id) = source_model {
+            if is_local_model(store, model_id).await? {
+                tracing::info!(
+                    model_id,
+                    "dropping Cursor model nudge away from a BYOK model"
+                );
+                continue;
+            }
+        }
+        kept.extend_from_slice(&field[..field.len() - rest.len()]);
+    }
+    Ok(kept.freeze())
 }
 
 pub async fn stripe_profile(
@@ -446,6 +520,48 @@ mod tests {
         consume_body(Request::new(body)).await.unwrap();
 
         assert!(polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn drops_only_model_nudges_away_from_byok_models() {
+        fn nudge_from(model_id: &str) -> Vec<u8> {
+            let model = |model_id: &str| agent::RequestedModel {
+                model_id: model_id.into(),
+                ..Default::default()
+            };
+            let mut nudge = Vec::new();
+            encoding::string::encode(1, &"nudge".to_owned(), &mut nudge);
+            encoding::message::encode(4, &model(model_id), &mut nudge);
+            encoding::message::encode(5, &model("default"), &mut nudge);
+            let mut response = Vec::new();
+            encoding::bytes::encode(MODEL_RECOMMENDATION_NUDGE_FIELD, &nudge, &mut response);
+            response
+        }
+        // Usage status as Cursor sends it, including a field this crate does not model.
+        let status = [0x0a, 0x08, 0x30, 0x01, 0x98, 0x01, 0x01, 0xd0, 0x01, 0x00];
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::connect(&format!(
+            "sqlite://{}",
+            directory.path().join("test.db").display()
+        ))
+        .await
+        .unwrap();
+
+        let byok = [
+            &status[..],
+            &nudge_from("plugin:dev.cursorbyok.examples.claude-auth/claude/claude-opus-5-5"),
+        ]
+        .concat();
+        let filtered = without_byok_model_nudge(&store, &Bytes::from(byok))
+            .await
+            .unwrap();
+        assert_eq!(&filtered[..], &status[..]);
+
+        let official = [&status[..], &nudge_from("claude-4.5-opus-high")].concat();
+        let filtered = without_byok_model_nudge(&store, &Bytes::from(official.clone()))
+            .await
+            .unwrap();
+        assert_eq!(&filtered[..], &official[..]);
     }
 
     #[test]
