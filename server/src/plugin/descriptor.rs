@@ -176,6 +176,12 @@ pub struct ResourceMetric {
     pub label: LocalizedText,
     pub unit: String,
     pub value: f64,
+    /// ISO 4217 code of a `currency` metric.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Cap that a `currency` amount is spent against.
+    #[serde(default)]
+    pub limit: Option<f64>,
     #[serde(default)]
     pub reset_at_ms: Option<i64>,
 }

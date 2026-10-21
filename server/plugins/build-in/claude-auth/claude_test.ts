@@ -498,7 +498,10 @@ Deno.test("refresh reads usage without rotating fresh tokens", async () => {
       },
     }),
   );
-  equal(urls, ["https://api.anthropic.com/api/oauth/usage"]);
+  equal(urls, [
+    "https://api.anthropic.com/api/oauth/usage",
+    "https://api.anthropic.com/api/oauth/organizations/org/prepaid/credits",
+  ]);
   equal(refreshed.state, { status: "ready" });
   const data = refreshed.privateData as Record<string, JsonValue>;
   equal(data.accessToken, (snapshot.privateData as Record<string, JsonValue>).accessToken);
@@ -534,6 +537,7 @@ Deno.test("refresh retries usage once after a rejected access token", async () =
     context({
       fetch: (url) => {
         if (url === TOKEN_URL) return response(tokens());
+        if (url.endsWith("/prepaid/credits")) return response(credits());
         usageCalls++;
         return usageCalls === 1 ? response({}, 401) : response(usage());
       },
@@ -565,6 +569,98 @@ Deno.test("refresh cools an account whose all-model limit is exhausted", async (
   );
   equal(refreshed.state?.status, "cooling");
   equal(refreshed.state?.status === "cooling" && refreshed.state.retryAtMs, Date.parse(resetsAt));
+});
+
+/** Trimmed real `/api/oauth/organizations/:org/prepaid/credits` response. */
+function credits(amount = 11063) {
+  return {
+    amount,
+    currency: "USD",
+    balance: { money: null, credits: { amount_minor: amount, exponent: 2 } },
+    auto_reload_settings: { enabled: true },
+  };
+}
+function extraUsageContext(extraUsage: Record<string, unknown>, balance: NetworkResponse) {
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+  return context({
+    fetch: (url) =>
+      url.endsWith("/prepaid/credits") ? balance : response({
+        limits: [{ kind: "weekly_all", percent: 100, resets_at: resetsAt, scope: null }],
+        extra_usage: extraUsage,
+      }),
+  });
+}
+
+Deno.test("refresh reports a capped extra usage month and the credit balance", async () => {
+  const snapshot = resource();
+  const refreshed = await claudeAccounts.refresh!(
+    snapshot,
+    extraUsageContext({
+      is_enabled: false,
+      monthly_limit: 4000,
+      used_credits: 4264.0,
+      currency: "USD",
+      decimal_places: 2,
+      disabled_reason: "org_level_disabled_until",
+      spend_limit_reached: true,
+    }, response(credits())),
+  );
+  equal(refreshed.state?.status, "cooling");
+  const view = claudeAccounts.present({ ...snapshot, privateData: refreshed.privateData! });
+  equal(
+    view.metrics?.map((metric) => [
+      metric.id,
+      metric.unit,
+      metric.value,
+      metric.currency,
+      metric.limit,
+    ]),
+    [
+      ["weekly_all", "percent", 0, undefined, undefined],
+      ["extra_usage", "currency", 42.64, "USD", 40],
+      ["credits", "currency", 110.63, "USD", undefined],
+    ],
+  );
+});
+
+Deno.test("enabled extra usage keeps an exhausted plan ready", async () => {
+  const snapshot = resource();
+  const capped = await claudeAccounts.refresh!(
+    snapshot,
+    extraUsageContext(
+      { is_enabled: true, monthly_limit: 15000, used_credits: 4264, currency: "USD" },
+      response(credits()),
+    ),
+  );
+  equal(capped.state, { status: "ready" });
+  const view = claudeAccounts.present({ ...snapshot, privateData: capped.privateData! });
+  const extra = view.metrics?.find((metric) => metric.id === "extra_usage");
+  equal([extra?.value, extra?.limit], [42.64, 150]);
+
+  const uncapped = await claudeAccounts.refresh!(
+    snapshot,
+    extraUsageContext(
+      { is_enabled: true, monthly_limit: null, used_credits: 4264, currency: "USD" },
+      response(credits()),
+    ),
+  );
+  const spent = claudeAccounts.present({ ...snapshot, privateData: uncapped.privateData! })
+    .metrics?.find((metric) => metric.id === "extra_usage");
+  equal([spent?.value, spent?.limit], [42.64, undefined]);
+});
+
+Deno.test("refresh keeps the last credit balance when its lookup fails", async () => {
+  const first = resource();
+  const before = await claudeAccounts.refresh!(
+    first,
+    extraUsageContext({ is_enabled: true, currency: "USD" }, response(credits(500))),
+  );
+  const after = await claudeAccounts.refresh!(
+    { ...first, privateData: before.privateData! },
+    extraUsageContext({ is_enabled: true, currency: "USD" }, response({}, 403)),
+  );
+  const view = claudeAccounts.present({ ...first, privateData: after.privateData! });
+  equal(view.metrics?.find((metric) => metric.id === "credits")?.value, 5);
 });
 
 Deno.test("token rotation keeps the last usage reading", () => {

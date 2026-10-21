@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  pluginMetricAmount,
   pluginText,
   type PluginAddMethod,
   type PluginDescriptor,
@@ -393,7 +394,7 @@ function ResourceRow({ item, actions, canRefresh, disabled, onAction, onRefresh,
       {item.metrics.map((metric) => <span key={metric.id}>
         {metric.unit === "percent"
           ? t("{label} 剩余 {percent}%", { label: pluginText(metric.label, locale), percent: Math.round(metric.value) })
-          : `${pluginText(metric.label, locale)}: ${metric.value}`}
+          : `${pluginText(metric.label, locale)}: ${pluginMetricAmount(metric, locale)}`}
       </span>)}
     </div>
     <div className={styles.actions}>

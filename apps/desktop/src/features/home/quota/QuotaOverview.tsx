@@ -1,5 +1,5 @@
 import type { PluginDescriptor, PluginResourceMetric, PluginResourceView } from "../../../shared/api";
-import { pluginText } from "../../../shared/api";
+import { pluginMetricAmount, pluginText } from "../../../shared/api";
 import { useI18n } from "../../../i18n/store";
 import styles from "./QuotaOverview.module.scss";
 
@@ -38,22 +38,29 @@ function levelClass(remaining: number) {
   return "";
 }
 
+/** Remaining share 0..100 for metrics drawn as a bar; null for plain values. */
+function remainingPercent(metric: PluginResourceMetric): number | null {
+  if (metric.unit === "percent") return metric.value;
+  if (metric.unit === "currency" && metric.limit != null && metric.limit > 0) {
+    return 100 * (1 - metric.value / metric.limit);
+  }
+  return null;
+}
+
 function MetricRow({ metric, locale, nowMs }: { metric: PluginResourceMetric; locale: string; nowMs: number }) {
   const label = pluginText(metric.label, locale);
-  if (metric.unit === "count") {
-    return <div className={styles.metric}>
-      <div className={styles.metricHeader}><span>{label}</span><span>{metric.value}</span></div>
-    </div>;
-  }
-  const remaining = Math.max(0, Math.min(100, metric.value));
+  const share = remainingPercent(metric);
+  const remaining = share === null ? null : Math.max(0, Math.min(100, share));
   return <div className={styles.metric}>
     <div className={styles.metricHeader}>
       <span>{label}</span>
-      <span className={styles.value}>{t("剩余 {percent}%", { percent: Math.round(remaining) })}</span>
+      <span className={styles.value}>
+        {metric.unit === "percent" ? t("剩余 {percent}%", { percent: Math.round(metric.value) }) : pluginMetricAmount(metric, locale)}
+      </span>
     </div>
-    <div className={styles.bar} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}>
+    {remaining !== null && <div className={styles.bar} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}>
       <div className={[styles.fill, levelClass(remaining)].filter(Boolean).join(" ")} style={{ width: `${remaining}%` }} />
-    </div>
+    </div>}
     {metric.resetAtMs != null && metric.resetAtMs > nowMs && <div className={styles.reset}>
       {t("重置于 {time}", { time: formatReset(metric.resetAtMs, locale, nowMs) })}
     </div>}

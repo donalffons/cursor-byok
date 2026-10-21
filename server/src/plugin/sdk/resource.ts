@@ -38,9 +38,13 @@ export type ResourcePatch = {
 export type ResourceMetric = {
   id: string;
   label: LocalizedText;
-  unit: "percent" | "count";
-  /** percent 指标表示剩余占比,0..100。 */
+  unit: "percent" | "count" | "currency";
+  /** percent 指标表示剩余占比,0..100;currency 指标是 `currency` 的主单位金额(如 42.64 美元)。 */
   value: number;
+  /** ISO 4217 货币代码,仅 currency 指标使用。 */
+  currency?: string;
+  /** currency 指标的上限:value 是在该上限内已花费的金额(如本月 42.64 / 150 美元)。 */
+  limit?: number;
   resetAtMs?: number;
 };
 

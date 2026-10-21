@@ -209,9 +209,24 @@ export interface PluginResourceState {
 export interface PluginResourceMetric {
   id: string;
   label: PluginLocalizedText;
-  unit: "percent" | "count";
+  unit: "percent" | "count" | "currency";
+  /** Remaining percent, a count, or an amount in major units of `currency`. */
   value: number;
+  currency?: string | null;
+  /** Cap that a currency amount is spent against. */
+  limit?: number | null;
   resetAtMs?: number | null;
+}
+
+/** Display text of a count or currency metric. */
+export function pluginMetricAmount(metric: PluginResourceMetric, locale: string): string {
+  if (metric.unit === "currency" && metric.currency) {
+    const money = new Intl.NumberFormat(locale, { style: "currency", currency: metric.currency });
+    return metric.limit != null
+      ? `${money.format(metric.value)} / ${money.format(metric.limit)}`
+      : money.format(metric.value);
+  }
+  return String(metric.value);
 }
 
 export interface PluginResourceView {

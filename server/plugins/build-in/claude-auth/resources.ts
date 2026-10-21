@@ -9,7 +9,7 @@ import {
   RESOURCE_TYPE,
 } from "./auth.ts";
 import { claudeOAuth } from "./oauth.ts";
-import { fetchUsage, quotaMetrics, quotaState, UsageError } from "./usage.ts";
+import { fetchCredits, fetchUsage, quotaMetrics, quotaState, UsageError } from "./usage.ts";
 
 export const claudeAccounts: ResourceSupport = {
   type: RESOURCE_TYPE,
@@ -49,6 +49,10 @@ export const claudeAccounts: ResourceSupport = {
         await rotate();
         quota = await fetchUsage(data.accessToken, context);
       }
+      // A failed balance lookup keeps the previous balance, like a failed usage lookup does.
+      const credits = await fetchCredits(data.accessToken, data.organizationId, context) ??
+        data.quota?.credits;
+      if (credits) quota.credits = credits;
       return { privateData: privateData({ ...data, quota }), state: quotaState(quota) };
     } catch (error) {
       if (error instanceof OAuthError && error.invalidCredentials) {

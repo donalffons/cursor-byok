@@ -71,9 +71,12 @@ External Messages request (`POST /byok/v1/messages`, `forwardMessages`)
 Usage refresh (host loop every 60 s, or the account's Refresh button)
   → plugin rotates credentials only if they expire soon, or once after a usage 401
   → /api/oauth/usage → `limits[]` (5-hour session, weekly all-models, weekly per-model)
-  → private `quota` + cooling while an all-models limit is used up
+    and `extra_usage` (enabled flag, monthly spend cap, spend so far)
+  → /api/oauth/organizations/<org>/prepaid/credits → prepaid usage-credit balance
+  → private `quota` + cooling while an all-models limit is used up and extra usage is off
   → host applies the patch only if the account did not change meanwhile
-  → account metrics: remaining percent and reset time per limit
+  → account metrics: remaining percent and reset time per limit, extra usage spent of the monthly cap,
+    usage-credit balance
 ```
 
 - Authorization/token constants match inspected Claude Code and current public client
@@ -105,7 +108,8 @@ Usage refresh (host loop every 60 s, or the account's Refresh button)
   `input_tokens` excludes the cache; the host's automatic compaction is driven by that total.
 - Quota comes from the undocumented `/api/oauth/usage` endpoint that Claude Code's `/usage` reads.
   It rate-limits unknown clients, so the request identifies as `claude-code/<version>`. A failed
-  lookup keeps the previous quota.
+  lookup keeps the previous quota. The credit balance comes from the prepaid-credits endpoint that
+  Claude Code's extra-usage screen reads; a failed balance lookup keeps the previous balance.
 - No static model fallback, credential-file import, API-key fallback, or local usage-quota
   estimation is provided. Available models are exactly what the upstream catalog returns;
   entitlement can still differ at inference time. The fast-latency hint is not mapped to an
@@ -162,8 +166,8 @@ deno task test
 deno task test:host
 ```
 
-The 32 unit tests use mocked networking and need no tokens or network permissions. The separate
-worker integration test starts the actual SDK worker with the host's sandbox flags and drives OAuth
+The unit tests use mocked networking and need no tokens or network permissions. The separate worker
+integration test starts the actual SDK worker with the host's sandbox flags and drives OAuth
 completion, profile lookup, model discovery, automatic token refresh, streaming events, and
 credential patches through its JSON protocol. Its parent test process needs subprocess and read
 permissions; the child has only plugin/SDK read access and no direct network access. All upstream
