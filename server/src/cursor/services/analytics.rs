@@ -14,6 +14,13 @@ use crate::{api::cursor::proxy, Error, Result};
 
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
+/// Cursor's `agent_host_local_loop` runs a client-side `RunInference` loop
+/// instead of the `AgentService/Run` protocol this server implements. It
+/// recognizes only Cursor's own API-key BYOK credentials and sends BYOK model
+/// IDs to Cursor's inference backend, which rejects them as unknown models,
+/// while its `BidiAppend` frames carry `RunInferenceClientMessage` payloads
+/// that conflict with `AgentClientMessage` decoding.
+const AGENT_HOST_LOCAL_LOOP_GATE: &str = "agent_host_local_loop";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -51,7 +58,7 @@ fn patch_upstream(response: proxy::BufferedResponse) -> Result<Response<Body>> {
     let (framed, payload) = unary_payload(&response.body)?;
     let mut message = BootstrapStatsigResponse::decode(payload)?;
     let mut config = serde_json::from_str::<Value>(&message.config)?;
-    enable_agent_retries(&mut config)?;
+    patch_gates(&mut config)?;
     message.config = serde_json::to_string(&config)?;
     Ok(response.with_body(encode_unary(&message, framed)))
 }
@@ -74,7 +81,7 @@ fn local_response() -> Result<Response<Body>> {
         },
         "time": generated_at_ms
     });
-    enable_agent_retries(&mut config)?;
+    patch_gates(&mut config)?;
     let message = BootstrapStatsigResponse {
         config: serde_json::to_string(&config)?,
         generated_at_ms,
@@ -96,8 +103,13 @@ fn local_response() -> Result<Response<Body>> {
     Ok(response)
 }
 
-fn enable_agent_retries(config: &mut Value) -> Result<()> {
-    let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+fn patch_gates(config: &mut Value) -> Result<()> {
+    set_gate(config, AGENT_RETRIES_GATE, true)?;
+    set_gate(config, AGENT_HOST_LOCAL_LOOP_GATE, false)
+}
+
+fn set_gate(config: &mut Value, gate: &str, enabled: bool) -> Result<()> {
+    let gate_key = statsig_key(config, gate);
     let root = config
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig bootstrap config must be an object".into()))?;
@@ -106,7 +118,7 @@ fn enable_agent_retries(config: &mut Value) -> Result<()> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig feature_gates must be an object".into()))?;
-    gates.insert(gate_key.clone(), enabled_gate(&gate_key));
+    gates.insert(gate_key.clone(), gate_entry(&gate_key, enabled));
     Ok(())
 }
 
@@ -127,10 +139,10 @@ fn djb2(value: &str) -> String {
         .to_string()
 }
 
-fn enabled_gate(name: &str) -> Value {
+fn gate_entry(name: &str, enabled: bool) -> Value {
     json!({
         "name": name,
-        "value": true,
+        "value": enabled,
         "rule_id": LOCAL_RULE,
         "ruleID": LOCAL_RULE,
         "group_name": LOCAL_RULE,
@@ -173,4 +185,33 @@ fn encode_unary(message: &impl Message, framed: bool) -> Bytes {
     output.put_u32(payload.len() as u32);
     output.extend_from_slice(&payload);
     output.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patches_agent_retries_on_and_local_loop_off_across_hash_modes() {
+        for (hash_used, retries_key, local_loop_key) in [
+            ("none", AGENT_RETRIES_GATE, AGENT_HOST_LOCAL_LOOP_GATE),
+            ("djb2", "101914982", "1967931573"),
+        ] {
+            let mut config = json!({
+                "hash_used": hash_used,
+                "feature_gates": {
+                    local_loop_key: {
+                        "name": local_loop_key,
+                        "value": true
+                    }
+                }
+            });
+            patch_gates(&mut config).unwrap();
+            assert_eq!(config["feature_gates"][retries_key]["value"], json!(true));
+            assert_eq!(
+                config["feature_gates"][local_loop_key]["value"],
+                json!(false)
+            );
+        }
+    }
 }
