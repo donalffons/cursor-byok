@@ -709,7 +709,10 @@ fn available_plugin_model(model: &PluginModelDescriptor) -> AvailableModel {
         tooltip_data: Some(tooltip.clone()),
         supports_thinking: Some(true),
         supports_images: Some(model.images),
-        supports_max_mode: Some(false),
+        // Cursor answers a Max mode write for a model without Max mode support
+        // by renaming the chat model to the first Max-capable model (Auto)
+        // while keeping the selection, which later routes turns to Auto.
+        supports_max_mode: Some(true),
         client_display_name: Some(model.display_name.clone()),
         server_model_name: Some(model.id.clone()),
         supports_non_max_mode: Some(true),
@@ -802,6 +805,35 @@ mod tests {
         }
     }
 
+    fn plugin_model() -> PluginModelDescriptor {
+        PluginModelDescriptor {
+            id: "plugin:test/provider/model".into(),
+            plugin_id: "plugin:test".into(),
+            plugin_name: "Test Plugin".into(),
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+            display_name: "Plugin Model".into(),
+            description: None,
+            icon: String::new(),
+            provider_type: "test".into(),
+            max_output_tokens: None,
+            images: false,
+            enabled: true,
+            forwards_messages: false,
+        }
+    }
+
+    #[test]
+    fn every_byok_model_supports_cursor_max_mode() {
+        for model in [
+            available_model(&model()),
+            available_plugin_model(&plugin_model()),
+        ] {
+            assert_eq!(model.supports_max_mode, Some(true), "{}", model.name);
+            assert_eq!(model.supports_non_max_mode, Some(true), "{}", model.name);
+        }
+    }
+
     #[test]
     fn cli_model_details_use_local_routing_credentials() {
         let details = usable_model(&model());
@@ -819,21 +851,7 @@ mod tests {
 
     #[test]
     fn cli_plugin_model_details_use_local_routing_credentials() {
-        let details = usable_plugin_model(&PluginModelDescriptor {
-            id: "plugin:test/provider/model".into(),
-            plugin_id: "plugin:test".into(),
-            plugin_name: "Test Plugin".into(),
-            provider_id: "provider".into(),
-            model_id: "model".into(),
-            display_name: "Plugin Model".into(),
-            description: None,
-            icon: String::new(),
-            provider_type: "test".into(),
-            max_output_tokens: None,
-            images: false,
-            enabled: true,
-            forwards_messages: false,
-        });
+        let details = usable_plugin_model(&plugin_model());
         assert_eq!(details.model_id, "plugin:test/provider/model");
         let agent::model_details::Credentials::ApiKeyCredentials(credentials) =
             details.credentials.expect("API credentials")
