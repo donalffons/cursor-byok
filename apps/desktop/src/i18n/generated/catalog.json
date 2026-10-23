@@ -47,7 +47,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 266,
+          "line": 267,
           "column": 39
         }
       ]
@@ -78,7 +78,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 372,
+          "line": 373,
           "column": 16
         }
       ]
@@ -311,12 +311,12 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 266,
+          "line": 267,
           "column": 93
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 328,
+          "line": 329,
           "column": 72
         }
       ]
@@ -740,7 +740,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 131,
+          "line": 132,
           "column": 15
         }
       ]
@@ -841,7 +841,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 452,
+          "line": 453,
           "column": 14
         }
       ]
@@ -928,7 +928,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 426,
+          "line": 427,
           "column": 50
         }
       ]
@@ -1095,7 +1095,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 139,
+          "line": 140,
           "column": 73
         }
       ]
@@ -1326,7 +1326,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 403,
+          "line": 404,
           "column": 68
         }
       ]
@@ -1338,7 +1338,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 474,
+          "line": 475,
           "column": 28
         }
       ]
@@ -1350,12 +1350,12 @@
       "refs": [
         {
           "file": "features/home/quota/QuotaOverview.tsx",
-          "line": 65,
+          "line": 73,
           "column": 111
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 488,
+          "line": 489,
           "column": 81
         }
       ]
@@ -1367,12 +1367,12 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 355,
+          "line": 356,
           "column": 32
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 355,
+          "line": 356,
           "column": 56
         }
       ]
@@ -1401,7 +1401,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 143,
+          "line": 144,
           "column": 64
         }
       ]
@@ -1430,7 +1430,7 @@
       "refs": [
         {
           "file": "features/home/quota/QuotaOverview.tsx",
-          "line": 73,
+          "line": 82,
           "column": 55
         }
       ]
@@ -1580,7 +1580,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 307,
+          "line": 308,
           "column": 106
         },
         {
@@ -1727,7 +1727,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 423,
+          "line": 424,
           "column": 82
         }
       ]
@@ -1885,7 +1885,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 139,
+          "line": 140,
           "column": 92
         }
       ]
@@ -2085,12 +2085,12 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 471,
+          "line": 472,
           "column": 30
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 490,
+          "line": 491,
           "column": 42
         }
       ]
@@ -2227,7 +2227,7 @@
       "refs": [
         {
           "file": "features/home/quota/QuotaOverview.tsx",
-          "line": 58,
+          "line": 65,
           "column": 8
         }
       ]
@@ -2425,7 +2425,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 454,
+          "line": 455,
           "column": 21
         }
       ]
@@ -2551,7 +2551,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 272,
+          "line": 273,
           "column": 102
         }
       ]
@@ -2683,7 +2683,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 134,
+          "line": 135,
           "column": 30
         }
       ]
@@ -2697,7 +2697,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 300,
+          "line": 301,
           "column": 12
         }
       ]
@@ -2709,7 +2709,7 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 532,
+          "line": 549,
           "column": 43
         }
       ]
@@ -3048,7 +3048,7 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 527,
+          "line": 544,
           "column": 43
         }
       ]
@@ -3202,7 +3202,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 395,
+          "line": 396,
           "column": 13
         }
       ]
@@ -3226,7 +3226,7 @@
       "refs": [
         {
           "file": "shared/api.ts",
-          "line": 461,
+          "line": 478,
           "column": 21
         }
       ]
@@ -3362,7 +3362,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 274,
+          "line": 275,
           "column": 33
         }
       ]
@@ -3437,7 +3437,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 373,
+          "line": 374,
           "column": 110
         },
         {
@@ -3536,7 +3536,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 134,
+          "line": 135,
           "column": 19
         }
       ]
@@ -3689,7 +3689,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 274,
+          "line": 275,
           "column": 20
         }
       ]
@@ -3735,7 +3735,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 473,
+          "line": 474,
           "column": 25
         }
       ]
@@ -3785,7 +3785,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 419,
+          "line": 420,
           "column": 111
         }
       ]
@@ -3811,8 +3811,8 @@
       "refs": [
         {
           "file": "features/home/quota/QuotaOverview.tsx",
-          "line": 52,
-          "column": 39
+          "line": 58,
+          "column": 38
         }
       ]
     },
@@ -3823,7 +3823,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 141,
+          "line": 142,
           "column": 147
         }
       ]
@@ -3948,7 +3948,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 92,
+          "line": 93,
           "column": 22
         }
       ]
@@ -4338,7 +4338,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 308,
+          "line": 309,
           "column": 107
         },
         {
@@ -4441,7 +4441,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 402,
+          "line": 403,
           "column": 84
         },
         {
@@ -4465,7 +4465,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 435,
+          "line": 436,
           "column": 84
         }
       ]
@@ -4771,13 +4771,25 @@
       "refs": [
         {
           "file": "features/home/quota/QuotaOverview.tsx",
-          "line": 64,
+          "line": 72,
           "column": 111
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 485,
+          "line": 486,
           "column": 81
+        }
+      ]
+    },
+    "bacb6894be589abd": {
+      "source": "额度最先重置的可用账号优先使用",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 74,
+          "column": 73
         }
       ]
     },
@@ -4969,7 +4981,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 368,
+          "line": 369,
           "column": 66
         }
       ]
@@ -5034,7 +5046,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 371,
+          "line": 372,
           "column": 102
         },
         {
@@ -5080,7 +5092,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 312,
+          "line": 313,
           "column": 37
         }
       ]
@@ -5285,7 +5297,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 268,
+          "line": 269,
           "column": 32
         }
       ]
@@ -5371,7 +5383,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 322,
+          "line": 323,
           "column": 22
         }
       ]
@@ -5501,7 +5513,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 462,
+          "line": 463,
           "column": 11
         }
       ]
@@ -5600,7 +5612,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 35,
+          "line": 36,
           "column": 71
         }
       ]
@@ -5686,7 +5698,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 139,
+          "line": 140,
           "column": 34
         }
       ]
@@ -5698,7 +5710,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 100,
+          "line": 101,
           "column": 36
         }
       ]
@@ -5818,7 +5830,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 268,
+          "line": 269,
           "column": 43
         }
       ]
@@ -5888,7 +5900,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 428,
+          "line": 429,
           "column": 100
         }
       ]
@@ -6029,7 +6041,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 434,
+          "line": 435,
           "column": 84
         }
       ]
@@ -6097,7 +6109,7 @@
       "refs": [
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 312,
+          "line": 313,
           "column": 69
         }
       ]
@@ -6255,6 +6267,18 @@
         }
       ]
     },
+    "fa48e89389404e60": {
+      "source": "使用中",
+      "kind": "text",
+      "placeholders": [],
+      "refs": [
+        {
+          "file": "features/home/quota/QuotaOverview.tsx",
+          "line": 74,
+          "column": 96
+        }
+      ]
+    },
     "fa5b4b8a751c7d1b": {
       "source": "Cursor 使用的本地代理端口；填写 0 时启动时随机选择。",
       "kind": "text",
@@ -6279,7 +6303,7 @@
         },
         {
           "file": "features/plugins/PluginResourcePanels.tsx",
-          "line": 304,
+          "line": 305,
           "column": 18
         }
       ]

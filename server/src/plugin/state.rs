@@ -42,6 +42,9 @@ pub struct ResourceRecord {
     pub key: String,
     pub private_data: serde_json::Value,
     pub state: ResourceState,
+    /// When the resource's included quota expires unused, as last reported by the plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -95,6 +98,18 @@ pub struct ResourcePatch {
     pub private_data: Option<serde_json::Value>,
     #[serde(default)]
     pub state: Option<ResourceStateInput>,
+    /// Absent keeps the stored reset; `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    pub quota_reset_at_ms: Option<Option<i64>>,
+}
+
+/// Tells an explicit `null` (`Some(None)`) apart from an absent field (`None`).
+fn present<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// SDK 侧 camelCase 状态输入,转换成核心存储形状。
@@ -278,6 +293,7 @@ impl PluginStateStore {
                         key: draft.key,
                         private_data: draft.private_data,
                         state,
+                        quota_reset_at_ms: None,
                         created_at_ms: now,
                         updated_at_ms: now,
                     });
@@ -433,6 +449,9 @@ fn patch_record(record: &mut ResourceRecord, patch: ResourcePatch) {
     if let Some(state) = patch.state {
         record.state = state.into();
     }
+    if let Some(quota_reset_at_ms) = patch.quota_reset_at_ms {
+        record.quota_reset_at_ms = quota_reset_at_ms;
+    }
     record.updated_at_ms = now_ms();
 }
 
@@ -500,11 +519,11 @@ mod tests {
                 "account",
                 &records[0].id,
                 ResourcePatch {
-                    private_data: None,
                     state: Some(ResourceStateInput::Cooling {
                         retry_at_ms: Some(200),
                         message: None,
                     }),
+                    ..ResourcePatch::default()
                 },
             )
             .await
@@ -533,7 +552,7 @@ mod tests {
             .unwrap();
         let stale = ResourcePatch {
             private_data: Some(serde_json::json!({ "token": "old", "quota": 1 })),
-            state: None,
+            ..ResourcePatch::default()
         };
         assert!(!store
             .apply_patch_if_current("dev.example", "account", &snapshot, stale)
@@ -544,7 +563,7 @@ mod tests {
 
         let fresh = ResourcePatch {
             private_data: Some(serde_json::json!({ "token": "rotated", "quota": 2 })),
-            state: None,
+            ..ResourcePatch::default()
         };
         assert!(store
             .apply_patch_if_current("dev.example", "account", &current, fresh)
@@ -552,6 +571,50 @@ mod tests {
             .unwrap());
         let records = store.resources("dev.example", "account").await.unwrap();
         assert_eq!(records[0].private_data["quota"], 2);
+    }
+
+    #[tokio::test]
+    async fn patches_keep_the_quota_reset_unless_they_set_or_clear_it() {
+        let (_root, store) = store();
+        store
+            .upsert_resources(
+                "dev.example",
+                "account",
+                vec![ResourceDraft {
+                    key: "acct-1".into(),
+                    private_data: serde_json::json!({}),
+                    state: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let id = store.resources("dev.example", "account").await.unwrap()[0]
+            .id
+            .clone();
+        let apply = |patch: serde_json::Value| {
+            let store = store.clone();
+            let id = id.clone();
+            async move {
+                let patch = serde_json::from_value(patch).unwrap();
+                store
+                    .apply_patch("dev.example", "account", &id, patch)
+                    .await
+                    .unwrap();
+                store.resources("dev.example", "account").await.unwrap()[0].quota_reset_at_ms
+            }
+        };
+        assert_eq!(
+            apply(serde_json::json!({ "quotaResetAtMs": 500 })).await,
+            Some(500)
+        );
+        assert_eq!(
+            apply(serde_json::json!({ "state": { "status": "ready" } })).await,
+            Some(500)
+        );
+        assert_eq!(
+            apply(serde_json::json!({ "quotaResetAtMs": null })).await,
+            None
+        );
     }
 
     #[tokio::test]

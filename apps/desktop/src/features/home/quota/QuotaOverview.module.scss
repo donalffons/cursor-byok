@@ -56,7 +56,8 @@
 }
 
 .cooling,
-.invalid {
+.invalid,
+.selected {
   flex: 0 0 auto;
   font-size: type.$font-size-xs;
 }
@@ -67,6 +68,10 @@
 
 .invalid {
   color: var(--vscode-errorForeground, #f48771);
+}
+
+.selected {
+  color: var(--vscode-testing-iconPassed, #73c991);
 }
 
 .metric {

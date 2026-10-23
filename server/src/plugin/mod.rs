@@ -11,6 +11,7 @@ mod oauth_callback;
 mod protocol;
 mod registry;
 mod runtime;
+mod selection;
 mod state;
 mod wire;
 mod worker;

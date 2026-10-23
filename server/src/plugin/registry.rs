@@ -20,6 +20,7 @@ use super::{
     },
     oauth_callback::{self, CallbackHandle, CallbackOutcome, CallbackRequest},
     runtime::PluginRuntime,
+    selection,
     state::{
         now_ms, PluginStateStore, ResourceDraft, ResourcePatch, ResourceRecord, ResourceState,
         StoredModel,
@@ -1235,16 +1236,20 @@ impl PluginRegistry {
             .and_then(|value| {
                 serde_json::from_value::<Vec<ResourcePresentation>>(value).map_err(Error::from)
             });
+        let selected = selection::preferred(records, now_ms()).map(|record| record.id.as_str());
+        let view = |record: &ResourceRecord, presentation| {
+            PluginResourceView::from_record(record, presentation, selected == Some(&record.id))
+        };
         match presented {
             Ok(views) if views.len() == records.len() => records
                 .iter()
                 .zip(views)
-                .map(|(record, view)| PluginResourceView::from_record(record, view))
+                .map(|(record, presentation)| view(record, presentation))
                 .collect(),
             Ok(_) | Err(_) => records
                 .iter()
                 .map(|record| {
-                    PluginResourceView::from_record(
+                    view(
                         record,
                         ResourcePresentation {
                             display_name: record.key.clone(),
@@ -1361,25 +1366,21 @@ impl PluginRegistry {
         Ok(models.len())
     }
 
-    /// 第一版选择策略:按创建顺序取首个可用资源;冷却到期视为可用。
+    /// Uses the preferred ready resource; when none is ready, the first one reports why.
     async fn select_resource(
         &self,
         plugin_id: &str,
         resource_type: &str,
     ) -> Result<ResourceRecord> {
         let records = self.inner.state.resources(plugin_id, resource_type).await?;
-        if records.is_empty() {
-            return Err(Error::Provider(format!(
-                "plugin '{plugin_id}' has no '{resource_type}' resource; add one first"
-            )));
-        }
-        let now = now_ms();
-        records
-            .iter()
-            .find(|record| record.state.is_ready(now))
+        selection::preferred(&records, now_ms())
             .or_else(|| records.first())
             .cloned()
-            .ok_or_else(|| Error::Provider("no plugin resource is available".into()))
+            .ok_or_else(|| {
+                Error::Provider(format!(
+                    "plugin '{plugin_id}' has no '{resource_type}' resource; add one first"
+                ))
+            })
     }
 
     async fn find_record(

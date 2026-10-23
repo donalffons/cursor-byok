@@ -9,7 +9,14 @@ import {
   RESOURCE_TYPE,
 } from "./auth.ts";
 import { claudeOAuth } from "./oauth.ts";
-import { fetchCredits, fetchUsage, quotaMetrics, quotaState, UsageError } from "./usage.ts";
+import {
+  fetchCredits,
+  fetchUsage,
+  quotaMetrics,
+  quotaResetAtMs,
+  quotaState,
+  UsageError,
+} from "./usage.ts";
 
 export const claudeAccounts: ResourceSupport = {
   type: RESOURCE_TYPE,
@@ -53,7 +60,11 @@ export const claudeAccounts: ResourceSupport = {
       const credits = await fetchCredits(data.accessToken, data.organizationId, context) ??
         data.quota?.credits;
       if (credits) quota.credits = credits;
-      return { privateData: privateData({ ...data, quota }), state: quotaState(quota) };
+      return {
+        privateData: privateData({ ...data, quota }),
+        state: quotaState(quota),
+        quotaResetAtMs: quotaResetAtMs(quota),
+      };
     } catch (error) {
       if (error instanceof OAuthError && error.invalidCredentials) {
         return { state: { status: "invalid", message: error.message } };

@@ -166,6 +166,8 @@ pub struct PluginResourceView {
     pub display_name: String,
     pub description: LocalizedText,
     pub metrics: Vec<ResourceMetric>,
+    /// Whether the next model call of this resource type uses this resource.
+    pub selected: bool,
     pub created_at_ms: i64,
 }
 
@@ -253,13 +255,18 @@ impl From<ResourceActionResult> for ResourceActionResponse {
 }
 
 impl PluginResourceView {
-    pub fn from_record(record: &ResourceRecord, presentation: ResourcePresentation) -> Self {
+    pub fn from_record(
+        record: &ResourceRecord,
+        presentation: ResourcePresentation,
+        selected: bool,
+    ) -> Self {
         Self {
             id: record.id.clone(),
             state: record.state.clone(),
             display_name: presentation.display_name,
             description: presentation.description,
             metrics: presentation.metrics,
+            selected,
             created_at_ms: record.created_at_ms,
         }
     }

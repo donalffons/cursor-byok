@@ -67,9 +67,11 @@ function MetricRow({ metric, locale, nowMs }: { metric: PluginResourceMetric; lo
   </div>;
 }
 
-function AccountState({ state }: { state: PluginResourceView["state"] }) {
+function AccountState({ account }: { account: PluginResourceView }) {
+  const { state } = account;
   if (state.status === "cooling") return <span className={styles.cooling} title={state.message ?? undefined}>{t("冷却中")}</span>;
   if (state.status === "invalid") return <span className={styles.invalid} title={state.message ?? undefined}>{t("已失效")}</span>;
+  if (account.selected) return <span className={styles.selected} title={t("额度最先重置的可用账号优先使用")}>{t("使用中")}</span>;
   return null;
 }
 
@@ -85,7 +87,7 @@ export function QuotaOverview({ accounts }: { accounts: QuotaAccount[] }) {
           <strong title={account.displayName}>{account.displayName}</strong>
           <span>{pluginName}</span>
         </div>
-        <AccountState state={account.state} />
+        <AccountState account={account} />
       </header>
       {account.metrics.map((metric) => <MetricRow key={metric.id} metric={metric} locale={locale} nowMs={nowMs} />)}
     </article>)}

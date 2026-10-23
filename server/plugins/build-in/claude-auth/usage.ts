@@ -157,6 +157,18 @@ export function quotaState(quota: AccountQuota, nowMs = Date.now()): ResourceSta
   };
 }
 
+/**
+ * The weekly all-models reset, after which unused plan quota is lost: the host spends the
+ * account whose week ends first. Null once a limit covering every model is used up, because the
+ * account then serves only through paid extra usage, or while the reset time is unknown.
+ */
+export function quotaResetAtMs(quota: AccountQuota, nowMs = Date.now()): number | null {
+  const limits = quota.limits.filter((limit) => limit.model === null);
+  if (limits.some((limit) => limit.usedPercent >= 100)) return null;
+  const resetAtMs = limits.find((limit) => limit.kind === "weekly_all")?.resetAtMs ?? null;
+  return resetAtMs !== null && resetAtMs > nowMs ? resetAtMs : null;
+}
+
 export function quotaMetrics(quota: AccountQuota | null | undefined): ResourceMetric[] {
   const metrics: ResourceMetric[] = (quota?.limits ?? []).map((limit) => ({
     id: limit.model ? `${limit.kind}:${limit.model}` : limit.kind,

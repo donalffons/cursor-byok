@@ -21,7 +21,7 @@ import { claudeOAuth } from "./oauth.ts";
 import { claudeAccounts } from "./resources.ts";
 import { claudeModels } from "./models.ts";
 import { claudeProvider, retryAtMs } from "./provider.ts";
-import { parseUsage } from "./usage.ts";
+import { parseUsage, quotaResetAtMs } from "./usage.ts";
 
 function assert(condition: unknown, message = "assertion failed"): asserts condition {
   if (!condition) throw new Error(message);
@@ -569,6 +569,33 @@ Deno.test("refresh cools an account whose all-model limit is exhausted", async (
   );
   equal(refreshed.state?.status, "cooling");
   equal(refreshed.state?.status === "cooling" && refreshed.state.retryAtMs, Date.parse(resetsAt));
+  equal(refreshed.quotaResetAtMs, null);
+});
+
+Deno.test("refresh reports the weekly reset so the host spends expiring quota first", async () => {
+  const resetsAt = new Date(Date.now() + 86_400_000).toISOString();
+  const refreshed = await claudeAccounts.refresh!(
+    resource(),
+    context({
+      fetch: () =>
+        response({
+          limits: [{ kind: "weekly_all", percent: 40, resets_at: resetsAt, scope: null }],
+        }),
+    }),
+  );
+  equal(refreshed.quotaResetAtMs, Date.parse(resetsAt));
+});
+
+Deno.test("quota reset is the weekly all-models reset while the plan has room", () => {
+  const quota = parseUsage(usage(), 0);
+  const weekly = Date.parse("2026-10-15T06:59:59.957415+00:00");
+  equal(quotaResetAtMs(quota, weekly - 1), weekly);
+  // A passed reset is unknown until the next refresh reads the following week.
+  equal(quotaResetAtMs(quota, weekly), null);
+  // With an all-models limit used up, only paid extra usage would serve the account.
+  const session = { ...quota.limits[0], usedPercent: 100 };
+  const exhausted = { ...quota, limits: [session, ...quota.limits.slice(1)] };
+  equal(quotaResetAtMs(exhausted, weekly - 1), null);
 });
 
 /** Trimmed real `/api/oauth/organizations/:org/prepaid/credits` response. */

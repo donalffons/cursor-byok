@@ -235,6 +235,8 @@ export interface PluginResourceView {
   displayName: string;
   description: PluginLocalizedText | null;
   metrics: PluginResourceMetric[];
+  /** Whether the next request of this plugin uses this account. */
+  selected: boolean;
   createdAtMs: number;
 }
 

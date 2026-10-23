@@ -74,6 +74,9 @@ Usage refresh (host loop every 60 s, or the account's Refresh button)
     and `extra_usage` (enabled flag, monthly spend cap, spend so far)
   → /api/oauth/organizations/<org>/prepaid/credits → prepaid usage-credit balance
   → private `quota` + cooling while an all-models limit is used up and extra usage is off
+  → `quotaResetAtMs`: the weekly all-models reset while every all-models limit has room, else
+    null; the host sends each request to the ready account whose quota resets first, so
+    quota that would expire unused is spent before quota that lasts longer
   → host applies the patch only if the account did not change meanwhile
   → account metrics: remaining percent and reset time per limit, extra usage spent of the monthly cap,
     usage-credit balance

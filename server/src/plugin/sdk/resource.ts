@@ -33,6 +33,12 @@ export type ResourceSnapshot = {
 export type ResourcePatch = {
   privateData?: JsonValue;
   state?: ResourceState;
+  /**
+   * When the resource's included quota expires unused (for example a weekly reset). The host
+   * uses the ready resource with the earliest reset first; `null` means nothing expires, so the
+   * resource is used after those that have a reset. Omitting the field keeps the stored value.
+   */
+  quotaResetAtMs?: number | null;
 };
 
 export type ResourceMetric = {
