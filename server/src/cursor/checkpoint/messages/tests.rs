@@ -190,6 +190,34 @@ fn cursor_user_image_uses_image_field() {
 }
 
 #[test]
+fn cursor_user_image_accepts_uint8array_hex_from_cursor_backend_turns() {
+    let wire = json!({
+        "role": "user",
+        "content": [
+            {
+                "type": "image",
+                "image": {"__type": "Uint8Array", "hex": "010203"},
+                "mimeType": "image/png",
+            },
+            {"type": "text", "text": "look"},
+        ],
+    });
+    let message = decode(
+        serde_json::to_vec(&wire).unwrap().as_slice(),
+        "cursor-root:user-image:0".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &message.content,
+        MessageContent::Parts { parts }
+            if parts[0] == ContentPart::Image {
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3],
+            }
+    ));
+}
+
+#[test]
 fn repeated_cursor_wire_ids_do_not_merge_distinct_tool_rounds() {
     fn assistant(call_id: &str, internal_id: &str) -> CanonicalMessage {
         let wire = json!({

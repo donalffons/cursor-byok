@@ -146,16 +146,10 @@ fn decode_text(value: &Value) -> Result<MessageContent> {
             Some("text") => Ok(ContentPart::Text {
                 text: required_string(part, "text")?.into(),
             }),
-            Some("image") => {
-                let mime_type = required_string(part, "mimeType")?;
-                let encoded = required_string(part, "image")?;
-                Ok(ContentPart::Image {
-                    mime_type: mime_type.into(),
-                    data: STANDARD.decode(encoded).map_err(|error| {
-                        Error::Protocol(format!("invalid Cursor image base64: {error}"))
-                    })?,
-                })
-            }
+            Some("image") => Ok(ContentPart::Image {
+                mime_type: required_string(part, "mimeType")?.into(),
+                data: image_bytes(part)?,
+            }),
             Some(kind) => Err(Error::Protocol(format!(
                 "unsupported Cursor message content part: {kind}"
             ))),
@@ -165,6 +159,23 @@ fn decode_text(value: &Value) -> Result<MessageContent> {
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(MessageContent::Parts { parts })
+}
+
+/// Reads image bytes in either form Cursor stores them: base64 text, or the
+/// `{"__type":"Uint8Array","hex":…}` value its Blob JSON codec writes for raw
+/// bytes, as in user messages from turns Cursor's own backend ran.
+fn image_bytes(part: &Value) -> Result<Vec<u8>> {
+    let image = part.get("image").unwrap_or(&Value::Null);
+    if let Some(encoded) = image.as_str() {
+        return STANDARD
+            .decode(encoded)
+            .map_err(|error| Error::Protocol(format!("invalid Cursor image base64: {error}")));
+    }
+    if image.get("__type").and_then(Value::as_str) == Some("Uint8Array") {
+        return hex::decode(required_string(image, "hex")?)
+            .map_err(|error| Error::Protocol(format!("invalid Cursor image hex: {error}")));
+    }
+    Err(Error::Protocol("Cursor message is missing image".into()))
 }
 
 fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> {
